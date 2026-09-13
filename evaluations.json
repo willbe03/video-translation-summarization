@@ -1,6 +1,8 @@
 [
   {
-    "skills": ["video-subtitles-and-summaries"],
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
     "query": "Translate this talk into Chinese subtitles: https://www.youtube.com/watch?v=R25FaF5QqXE",
     "expected_behavior": [
       "Launches one orchestrator subagent instead of running any pipeline step in the main session",
@@ -9,7 +11,9 @@
     ]
   },
   {
-    "skills": ["video-subtitles-and-summaries"],
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
     "query": "Summarize ~/Movies/standup-2026-03-11.mkv for me",
     "expected_behavior": [
       "Treats the argument as a local file and never attempts a download",
@@ -19,7 +23,9 @@
     ]
   },
   {
-    "skills": ["video-subtitles-and-summaries"],
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
     "query": "Subtitle this in Spanish, keep the gaming slang instead of translating it literally: https://www.bilibili.com/video/BV1xx411c7mD",
     "expected_behavior": [
       "Passes the slang instruction through to --style rather than inventing a flag for it",
@@ -28,7 +34,9 @@
     ]
   },
   {
-    "skills": ["video-subtitles-and-summaries"],
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
     "query": "Set this skill up for me, I'd rather nothing left my laptop",
     "expected_behavior": [
       "Follows references/INSTALL.md",
@@ -39,12 +47,36 @@
     ]
   },
   {
-    "skills": ["video-subtitles-and-summaries"],
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
     "query": "The proofreader changed 'GG' to 'good game' in a few cues, fix those",
     "expected_behavior": [
       "Uses vstudio plan-proofread --only with the affected cue ids",
       "Does not rerun the whole proofread stage or regenerate the translation",
       "Re-runs verify afterwards and reports whether the drift is gone"
+    ]
+  },
+  {
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
+    "query": "Subtitle this anime episode in English, the Japanese audio not the dub: ~/Videos/ep01.mkv",
+    "expected_behavior": [
+      "Passes the spoken language to vstudio new so the Japanese track is chosen",
+      "Reads the audio_tracks list in the output and confirms the chosen track before transcribing",
+      "Does not accept the container's default track without checking, since on a dubbed file it is often the dub"
+    ]
+  },
+  {
+    "skills": [
+      "video-subtitles-and-summaries"
+    ],
+    "query": "Translate this 90 minute conference talk into Chinese",
+    "expected_behavior": [
+      "Does not dispatch every task in one batch without reading waves in the plan output",
+      "Dispatches in groups of dispatch_at_once when waves is above one, and runs apply only after the last group",
+      "Reports the timing table, distinguishing the worker rounds from its own launch delay"
     ]
   }
 ]

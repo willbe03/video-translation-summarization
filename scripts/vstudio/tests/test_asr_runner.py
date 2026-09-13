@@ -157,47 +157,98 @@ def _fake_ffmpeg(calls, *, size):
     return run
 
 
-def test_an_accepted_codec_is_copied_rather_than_re_encoded(tmp_path, monkeypatch):
+ACCEPTS = Capabilities(
+    name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
+    returns_word_times=True, requirements="",
+    accepts_codecs=(("opus", ".ogg"), ("mp3", ".mp3")),
+    passthrough_max_bitrate=192_000,
+    convert_to=(("libopus", ".ogg", 192_000),),
+    max_upload_bytes=300 * 1024 * 1024,
+)
+
+
+def _sixty_seconds(monkeypatch):
+    monkeypatch.setattr(asr, "media_duration", lambda path: 60.0)
+
+
+def test_an_accepted_codec_under_the_bitrate_is_copied(tmp_path, monkeypatch):
     """Uploading the track the file already holds is smaller and spares the
     speech a decode and re-encode before the recogniser ever sees it."""
     calls = []
+    _sixty_seconds(monkeypatch)
     monkeypatch.setattr(asr, "_track_codec", lambda media, track: "opus")
-    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=1024))
-    caps = Capabilities(
-        name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
-        returns_word_times=True, requirements="", accepts_codecs=(("opus", ".ogg"),),
-        max_upload_bytes=10 * 1024,
-    )
-    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=caps)
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=120_000 * 60 // 8))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
     assert out.suffix == ".ogg"
-    assert "copy" in calls[0] and len(calls) == 1
+    assert len(calls) == 1 and "copy" in calls[0]
 
 
-def test_an_unaccepted_codec_falls_back_to_mono_pcm(tmp_path, monkeypatch):
+def test_an_accepted_codec_above_the_bitrate_is_converted(tmp_path, monkeypatch):
+    """Past the ceiling the track carries detail the recogniser cannot use, so
+    converting it is smaller at no cost that matters for speech."""
     calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "mp3")
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=320_000 * 60 // 8))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg"
+    assert "-b:a" in calls[-1] and "192000" in calls[-1]
+
+
+def test_an_unaccepted_codec_is_converted(tmp_path, monkeypatch):
+    calls = []
+    _sixty_seconds(monkeypatch)
     monkeypatch.setattr(asr, "_track_codec", lambda media, track: "dts")
     monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=1024))
-    caps = Capabilities(
-        name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
-        returns_word_times=True, requirements="", accepts_codecs=(("opus", ".ogg"),),
-    )
-    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=caps)
-    assert out.suffix == ".wav" and "pcm_s16le" in calls[0]
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg" and "libopus" in calls[0]
+    assert len(calls) == 1  # no pointless remux of a codec that cannot be copied
 
 
-def test_a_copy_that_comes_out_too_large_is_re_encoded(tmp_path, monkeypatch):
-    """A lossless multichannel track is bigger than the mono downmix, so
-    copying it would be the wrong call even though the codec is accepted."""
+def test_the_bitrate_is_measured_not_read_from_the_container(tmp_path, monkeypatch):
+    """Matroska stores Opus with no declared bitrate, so reading the source
+    would convert every web video for no reason."""
     calls = []
-    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "flac")
-    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=10 ** 6))
-    caps = Capabilities(
-        name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
-        returns_word_times=True, requirements="", accepts_codecs=(("flac", ".flac"),),
-        max_upload_bytes=1024,
-    )
-    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=caps)
-    assert out.suffix == ".wav" and any("pcm_s16le" in c for c in calls)
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "opus")
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=100_000 * 60 // 8))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg"
+
+
+def test_a_copy_that_comes_out_too_large_is_converted(tmp_path, monkeypatch):
+    calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "mp3")
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=400 * 1024 * 1024))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg" and any("libopus" in c for c in calls)
+
+
+def test_a_codec_that_will_not_remux_falls_back_rather_than_failing(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "opus")
+
+    def run(cmd):
+        calls.append(cmd)
+        if "copy" in cmd:
+            raise sp.CalledProcessError(1, cmd)
+        Path(cmd[-1]).write_bytes(b"\0")
+
+    monkeypatch.setattr(asr, "run", run)
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg"
+
+
+def test_a_backend_declaring_nothing_still_gets_mono_pcm(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=16))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav",
+                            capabilities=FakeBackend.capabilities)
+    assert out.suffix == ".wav" and "pcm_s16le" in calls[0]
 
 
 def test_the_declared_content_type_matches_what_was_uploaded():
@@ -227,3 +278,50 @@ def test_the_request_timeout_grows_with_what_has_to_be_uploaded():
 
     assert request_timeout(11 * 1024 * 1024) < request_timeout(165 * 1024 * 1024)
     assert request_timeout(10**12) <= 3600
+
+
+def test_a_missing_encoder_falls_through_the_chain(tmp_path, monkeypatch):
+    """libopus is optional in some ffmpeg builds. Falling straight to PCM would
+    turn a 9 MB upload into 165 MB, so MP3 is tried in between."""
+    import subprocess as sp
+
+    calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "dts")
+
+    def run(cmd):
+        calls.append(cmd)
+        if "libopus" in cmd:
+            raise sp.CalledProcessError(1, cmd)
+        Path(cmd[-1]).write_bytes(b"\0")
+
+    monkeypatch.setattr(asr, "run", run)
+    chain = Capabilities(
+        name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
+        returns_word_times=True, requirements="",
+        convert_to=(("libopus", ".ogg", 192_000), ("libmp3lame", ".mp3", 192_000)),
+    )
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=chain)
+    assert out.suffix == ".mp3"
+
+
+def test_every_encoder_failing_still_yields_mono_pcm(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    calls = []
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "dts")
+
+    def run(cmd):
+        calls.append(cmd)
+        if "pcm_s16le" not in cmd:
+            raise sp.CalledProcessError(1, cmd)
+        Path(cmd[-1]).write_bytes(b"\0")
+
+    monkeypatch.setattr(asr, "run", run)
+    chain = Capabilities(
+        name="c", needs_segmentation=False, segment_seconds=None, max_parallel=1,
+        returns_word_times=True, requirements="",
+        convert_to=(("libopus", ".ogg", 192_000), ("libmp3lame", ".mp3", 192_000)),
+    )
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=chain)
+    assert out.suffix == ".wav"

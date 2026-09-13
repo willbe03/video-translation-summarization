@@ -64,38 +64,75 @@ def extract_audio(
 ) -> Path:
     """The chosen audio track, ready to hand to the backend.
 
-    When the backend takes the track's own codec the stream is copied, which
-    uploads a fraction of the bytes and avoids decoding and re-encoding speech
-    the recogniser is about to analyse. Otherwise it is converted to 16 kHz
-    mono WAV, which every backend here accepts.
+    A track already in a codec the backend accepts, and not encoded more richly
+    than speech recognition can use, is copied: a fraction of the bytes and one
+    generation of loss fewer than decoding and re-encoding it. Anything else is
+    converted once, to a bitrate comfortably above what the recogniser needs.
 
     The track is named explicitly rather than left to ffmpeg's default, which
     on a file carrying a dub or a commentary is not necessarily the programme.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     accepted = dict(capabilities.accepts_codecs) if capabilities else {}
-    if accepted:
-        codec = _track_codec(media, track)
-        suffix = accepted.get(codec)
-        if suffix:
-            copied = target.with_suffix(suffix)
-            try:
-                run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
-                     "-map", f"0:a:{track}", "-vn", "-c:a", "copy", str(copied)])
-            except subprocess.CalledProcessError:
-                copied.unlink(missing_ok=True)  # not every codec remuxes cleanly
-            else:
-                cap = capabilities.max_upload_bytes if capabilities else None
-                if not cap or copied.stat().st_size <= cap:
-                    return copied
-                # A lossless multichannel track is larger than the downmix.
-                copied.unlink(missing_ok=True)
-    run([
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
-        "-map", f"0:a:{track}", "-vn", "-ac", "1", "-ar", "16000",
-        "-c:a", "pcm_s16le", str(target),
-    ])
+    suffix = accepted.get(_track_codec(media, track)) if accepted else None
+    if suffix:
+        copied = target.with_suffix(suffix)
+        if _copy_track(media, copied, track) and _acceptable_copy(copied, capabilities):
+            return copied
+        copied.unlink(missing_ok=True)
+
+    for convert in (capabilities.convert_to if capabilities else ()):
+        if _convert(media, target, track, convert):
+            return target.with_suffix(convert[1])
+    # Mono PCM needs no optional encoder, so it is what is left when every
+    # preferred one is missing from this ffmpeg build.
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
+         "-map", f"0:a:{track}", "-vn", "-ac", "1", "-ar", "16000",
+         "-c:a", "pcm_s16le", str(target)])
     return target
+
+
+def _convert(media: Path, target: Path, track: int, convert: tuple[str, str, int]) -> bool:
+    codec, extension, bitrate = convert
+    out = target.with_suffix(extension)
+    try:
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
+             "-map", f"0:a:{track}", "-vn", "-c:a", codec, "-b:a", str(bitrate), str(out)])
+    except subprocess.CalledProcessError:
+        out.unlink(missing_ok=True)
+        return False
+    return out.is_file() and out.stat().st_size > 0
+
+
+def _copy_track(media: Path, target: Path, track: int) -> bool:
+    """Remux one track without touching its samples. False if it will not go."""
+    try:
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
+             "-map", f"0:a:{track}", "-vn", "-c:a", "copy", str(target)])
+    except subprocess.CalledProcessError:
+        return False  # not every codec remuxes into every container
+    return target.is_file() and target.stat().st_size > 0
+
+
+def _acceptable_copy(copied: Path, capabilities: Capabilities | None) -> bool:
+    """Whether to keep the copy, judged on what it actually came out as.
+
+    The bitrate is measured from the remuxed file rather than read from the
+    source, because a container often declares nothing: Matroska stores Opus
+    with no bit_rate at all, and guessing high would convert every web video
+    for no reason.
+    """
+    if capabilities is None:
+        return True
+    if capabilities.max_upload_bytes and copied.stat().st_size > capabilities.max_upload_bytes:
+        return False
+    ceiling = capabilities.passthrough_max_bitrate
+    if not ceiling:
+        return True
+    seconds = media_duration(copied)
+    if seconds <= 0:
+        return True
+    return (copied.stat().st_size * 8 / seconds) <= ceiling
 
 
 def _track_codec(media: Path, track: int) -> str:

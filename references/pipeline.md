@@ -23,7 +23,28 @@ Set `VS="uv run --project scripts/vstudio vstudio"` once and use `$VS` after
 that. Every command prints JSON on stdout. Read that JSON; do not go looking in
 the job directory for the same answer.
 
-Keep a todo list with one entry per step so a long job does not lose its place.
+Copy the checklist for your branch and tick items off as you go. A long job is
+easy to lose your place in, and the step most often skipped is the last one.
+
+```
+Subtitles:
+- [ ] new           acquire, and check which audio track it picked
+- [ ] asr           transcribe
+- [ ] plan-segment  -> dispatch -> apply-segment
+- [ ] plan-translate -> dispatch -> apply-translate
+- [ ] plan-proofread -> dispatch -> apply-proofread
+- [ ] render
+- [ ] verify        read the adjudicate list, rerun cues that need it
+- [ ] timing        report paths and the table
+
+Summary:
+- [ ] new           acquire, and check which audio track it picked
+- [ ] asr           transcribe
+- [ ] plan-summarize -> dispatch -> apply-summarize
+- [ ] plan-synthesize -> dispatch -> apply-synthesize
+- [ ] check-summary  act on a coverage warning rather than reporting it
+- [ ] timing         report paths and the table
+```
 
 ## The rhythm of every stage
 
@@ -77,11 +98,12 @@ detected language, and its own internal timings.
 If the source language matters and the user told you, pass a locale:
 `--language en-US`. Otherwise let it detect.
 
-What goes to the endpoint is the chosen track, copied rather than re-encoded
-whenever the endpoint takes its codec, which covers the Opus and AAC that web
-video almost always uses. That halves the upload and spares the speech a decode
-and re-encode before the recogniser sees it. Anything else becomes 16 kHz mono
-WAV. The output reports `uploaded_format` and `uploaded_bytes`.
+What goes to the endpoint is the chosen track. A track already in a codec the
+endpoint takes, and under 192 kbps, is copied rather than re-encoded: half the
+bytes and one generation of loss fewer. Anything richer or in another codec is
+converted once to 192 kbps Opus. The output reports `uploaded_format` and
+`uploaded_bytes`, and a six minute video uploads five to eight megabytes rather
+than the eleven that uncompressed audio would cost.
 
 ## Subtitles: segment, translate, proofread, render, verify
 

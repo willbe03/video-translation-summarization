@@ -44,7 +44,9 @@ invoke it by asking for a video to be subtitled or summarized.
 ## Transcription backends
 
 `mai` sends audio to MAI-Transcribe-2 on Azure Speech. It needs a key, it is
-fast, and the audio leaves the machine.
+fast, and the audio leaves the machine. Only the chosen audio track goes up,
+copied when it is already Opus, MP3 or FLAC under 192 kbps and converted to
+192 kbps Opus otherwise.
 
 `qwen-local` runs Qwen3-ASR and a forced aligner on your own machine. Nothing
 leaves it, and it costs about 5.5 GB of weights plus several gigabytes of

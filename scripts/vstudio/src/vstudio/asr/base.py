@@ -70,11 +70,20 @@ class Capabilities:
     max_whole_file_seconds: float | None = None
     # Codecs the backend takes as they are, mapped to the container extension
     # to copy them into. A track already in one of these is handed over without
-    # being decoded and re-encoded, which is both smaller and one generation
-    # of loss fewer. Empty means everything is converted to 16 kHz mono WAV.
+    # being decoded and re-encoded, which is both smaller and one generation of
+    # loss fewer. Empty means every track is converted.
     accepts_codecs: tuple[tuple[str, str], ...] = ()
-    # Above this, copying is the wrong call even when the codec is accepted:
-    # a lossless multichannel track is far larger than the mono downmix.
+    # Above this bitrate a copy is no longer the cheap option: the track is
+    # carrying detail the recogniser cannot use, and converting it is smaller
+    # without costing anything that matters for speech.
+    passthrough_max_bitrate: int | None = None
+    # (encoder, container extension, bitrate) candidates for everything not
+    # copied, tried in order. More than one because the preferred encoder is
+    # optional in some ffmpeg builds, and falling all the way back to PCM would
+    # turn a 9 MB upload into 165 MB.
+    convert_to: tuple[tuple[str, str, int], ...] = ()
+    # A copy larger than this is converted regardless, so a lossless
+    # multichannel track cannot blow past what the endpoint accepts.
     max_upload_bytes: int | None = None
     extras: tuple[str, ...] = field(default_factory=tuple)
 

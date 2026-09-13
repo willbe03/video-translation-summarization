@@ -296,9 +296,20 @@ class MaiBackend:
         # Documented as accepted by the endpoint. Web video is almost always
         # Opus or AAC already, so the usual case uploads a tenth of the bytes
         # and skips a decode and re-encode of the speech entirely.
-        accepts_codecs=(
-            ("opus", ".ogg"), ("aac", ".m4a"), ("mp3", ".mp3"), ("flac", ".flac"),
-        ),
+        # Measured against the endpoint rather than taken from its
+        # documentation, which lists AAC among the accepted codecs but rejects
+        # it in both an MP4 container and raw ADTS with "Format not
+        # recognised". WAV, FLAC, MP3 and Opus in OGG all transcribe.
+        accepts_codecs=(("opus", ".ogg"), ("mp3", ".mp3"), ("flac", ".flac")),
+        # Speech carries no detail past this that a recogniser can use, so a
+        # richer track is worth converting rather than uploading whole.
+        passthrough_max_bitrate=192_000,
+        # Opus stands in for the AAC the endpoint will not take. It is at least
+        # as good per bit for speech, and 192k is generous for it. Two hours is
+        # about 170 MB, inside every documented limit. MP3 follows because
+        # libopus is optional in some ffmpeg builds while libmp3lame is
+        # everywhere, and the endpoint takes both.
+        convert_to=(("libopus", ".ogg", 192_000), ("libmp3lame", ".mp3", 192_000)),
         # The endpoint refuses anything over 500 MB; stopping well short leaves
         # room for the multipart envelope and a slow link.
         max_upload_bytes=300 * 1024 * 1024,
