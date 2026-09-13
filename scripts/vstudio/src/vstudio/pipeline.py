@@ -9,6 +9,7 @@ model to notice.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -30,6 +31,54 @@ from vstudio.cues import (
 WORDS_PER_SEGMENT_TASK = 400
 CUES_PER_TRANSLATE_TASK = 40
 CUES_PER_PROOFREAD_TASK = 60
+
+# The most a batch may grow to when the task count is being held down. Past
+# these a worker is writing enough lines in one answer that a truncation costs
+# more than the extra round would have. Roughly three times the target.
+MAX_WORDS_PER_SEGMENT_TASK = 1200
+MAX_CUES_PER_TRANSLATE_TASK = 150
+MAX_CUES_PER_PROOFREAD_TASK = 200
+
+MAX_TASKS_ENV = "VSTUDIO_MAX_TASKS"
+
+
+def batch_size(total: int, target: int, ceiling: int, max_tasks: int | None) -> int:
+    """Grow the batch just enough to keep the task count inside `max_tasks`.
+
+    Fewer, larger tasks are better for continuity as well as for a harness that
+    caps concurrent children, so the batch grows before the orchestrator is
+    asked to dispatch in waves. It stops at `ceiling`, past which one worker is
+    writing too much in a single answer.
+    """
+    if not max_tasks or max_tasks < 1 or total <= target * max_tasks:
+        return target
+    return min(ceiling, -(-total // max_tasks))
+
+
+def _max_tasks(explicit: int | None) -> int | None:
+    if explicit is not None:
+        return explicit
+    configured = os.environ.get(MAX_TASKS_ENV)
+    try:
+        return int(configured) if configured else None
+    except ValueError:
+        return None
+
+
+def _wave_plan(count: int, max_tasks: int | None) -> dict[str, Any]:
+    """Tell the orchestrator whether one round of dispatch will do."""
+    if not max_tasks or count <= max_tasks:
+        return {"tasks_planned": count, "waves": 1}
+    return {
+        "tasks_planned": count,
+        "waves": -(-count // max_tasks),
+        "dispatch_at_once": max_tasks,
+        "note": (
+            f"this harness runs {max_tasks} workers at a time, so dispatch the brief "
+            f"list in groups of {max_tasks} and wait for each group before starting the "
+            f"next. Run apply once, after the last group."
+        ),
+    }
 # Neighbours shown around a proofreading batch so a fix at a seam can see what
 # it has to agree with.
 PROOFREAD_CONTEXT_CUES = 4
@@ -81,10 +130,18 @@ def batch_items(items: Sequence[Any], size: int) -> list[list[Any]]:
 # --- segment ---
 
 
-def plan_segment(job: Path, *, language: str, size: int = WORDS_PER_SEGMENT_TASK) -> dict[str, Any]:
+def plan_segment(
+    job: Path,
+    *,
+    language: str,
+    size: int = WORDS_PER_SEGMENT_TASK,
+    max_tasks: int | None = None,
+) -> dict[str, Any]:
     asr = _read(job, "asr", "words.json")
     words = asr["words"]
     tasks.reset_stage(job, "segment")
+    limit = _max_tasks(max_tasks)
+    size = batch_size(len(words), size, MAX_WORDS_PER_SEGMENT_TASK, limit)
     ranges = batch_words(words, size)
     instructions = prompts.segment(language=language)
     directories = []
@@ -106,7 +163,8 @@ def plan_segment(job: Path, *, language: str, size: int = WORDS_PER_SEGMENT_TASK
                 meta={"first_word": start, "last_word": end},
             )
         )
-    return tasks.plan(job, "segment", directories, words=len(words), tasks_planned=len(ranges))
+    return tasks.plan(job, "segment", directories, words=len(words),
+                      words_per_task=size, **_wave_plan(len(ranges), limit))
 
 
 def apply_segment(job: Path) -> dict[str, Any]:
@@ -156,9 +214,12 @@ def plan_translate(
     instructions: str = "",
     page_text: str = "",
     size: int = CUES_PER_TRANSLATE_TASK,
+    max_tasks: int | None = None,
 ) -> dict[str, Any]:
     cues = _read(job, "cues", "cues.json")
     tasks.reset_stage(job, "translate")
+    limit = _max_tasks(max_tasks)
+    size = batch_size(len(cues), size, MAX_CUES_PER_TRANSLATE_TASK, limit)
     body = prompts.translate(
         source_language=source_language,
         target_language=target_language,
@@ -182,7 +243,8 @@ def plan_translate(
         )
         for index, batch in enumerate(batches)
     ]
-    return tasks.plan(job, "translate", directories, cues=len(cues), tasks_planned=len(batches))
+    return tasks.plan(job, "translate", directories, cues=len(cues),
+                      cues_per_task=size, **_wave_plan(len(batches), limit))
 
 
 def apply_translate(job: Path) -> dict[str, Any]:
@@ -264,6 +326,7 @@ def plan_proofread(
     page_text: str = "",
     size: int = CUES_PER_PROOFREAD_TASK,
     only: Sequence[int] | None = None,
+    max_tasks: int | None = None,
 ) -> dict[str, Any]:
     cues = _read(job, "cues", "translated.json")
     by_id = {int(c["id"]): c for c in cues}
@@ -271,6 +334,8 @@ def plan_proofread(
     if not selected:
         raise RuntimeError("no cues selected for proofreading")
     tasks.reset_stage(job, "proofread")
+    limit = _max_tasks(max_tasks)
+    size = batch_size(len(selected), size, MAX_CUES_PER_PROOFREAD_TASK, limit)
     body = prompts.proofread(
         source_language=source_language,
         target_language=target_language,
@@ -297,9 +362,8 @@ def plan_proofread(
                 meta={"ids": ids},
             )
         )
-    return tasks.plan(
-        job, "proofread", directories, cues=len(selected), tasks_planned=len(batches)
-    )
+    return tasks.plan(job, "proofread", directories, cues=len(selected),
+                      cues_per_task=size, **_wave_plan(len(batches), limit))
 
 
 def _proof_row(cue: Mapping[str, Any], *, context: bool = False) -> dict[str, Any]:
@@ -373,6 +437,7 @@ def plan_summarize(
     language: str,
     instructions: str = "",
     seconds: int = SUMMARY_SECONDS_PER_TASK,
+    max_tasks: int | None = None,
 ) -> dict[str, Any]:
     asr = _read(job, "asr", "words.json")
     segments = _transcript_segments(job, asr)
@@ -397,7 +462,8 @@ def plan_summarize(
         )
         for index, part in enumerate(parts)
     ]
-    return tasks.plan(job, "summarize", directories, parts=len(parts))
+    return tasks.plan(job, "summarize", directories, parts=len(parts),
+                      **_wave_plan(len(parts), _max_tasks(max_tasks)))
 
 
 # Without cues, the transcript is cut into fixed stretches so a summary worker

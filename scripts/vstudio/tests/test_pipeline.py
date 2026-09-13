@@ -327,3 +327,38 @@ def test_cues_are_preferred_over_the_fallback(transcribed):
     segments = pipeline._transcript_segments(transcribed, payload)
     assert [s["text"] for s in segments] == ["one two three", "four five six seven",
                                              "eight nine ten eleven twelve"]
+
+
+def test_batches_grow_before_the_orchestrator_is_asked_to_wait():
+    """Fewer larger tasks beat more waves: continuity improves and a harness
+    that caps concurrent children stops refusing the call."""
+    assert pipeline.batch_size(1415, 40, 150, None) == 40
+    assert pipeline.batch_size(1415, 40, 150, 10) == 142
+    # A short video is left at the target size rather than padded out.
+    assert pipeline.batch_size(94, 40, 150, 10) == 40
+
+
+def test_a_batch_stops_growing_at_the_ceiling():
+    """Past the ceiling one worker writes enough that a truncation costs more
+    than the extra round would have."""
+    assert pipeline.batch_size(100_000, 400, 1200, 10) == 1200
+
+
+def test_waves_are_reported_only_when_one_round_will_not_do():
+    assert pipeline._wave_plan(8, 10) == {"tasks_planned": 8, "waves": 1}
+    assert pipeline._wave_plan(8, None) == {"tasks_planned": 8, "waves": 1}
+    many = pipeline._wave_plan(12, 10)
+    assert many["waves"] == 2 and many["dispatch_at_once"] == 10
+    assert "groups of 10" in many["note"]
+
+
+def test_the_cap_comes_from_the_environment_when_not_passed(transcribed, monkeypatch):
+    monkeypatch.setenv(pipeline.MAX_TASKS_ENV, "2")
+    plan = pipeline.plan_segment(transcribed, language="English", size=2)
+    assert plan["tasks_planned"] <= 2 and plan["waves"] == 1
+
+
+def test_a_malformed_cap_is_ignored_rather_than_failing_a_job(transcribed, monkeypatch):
+    monkeypatch.setenv(pipeline.MAX_TASKS_ENV, "lots")
+    plan = pipeline.plan_segment(transcribed, language="English", size=100)
+    assert plan["waves"] == 1

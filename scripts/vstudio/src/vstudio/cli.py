@@ -56,6 +56,8 @@ def cmd_configure(args: argparse.Namespace) -> int:
         values[jobs.ARTIFACTS_ENV] = str(root)
     if args.provider:
         values[jobs.PROVIDER_ENV] = args.provider
+    if args.max_tasks:
+        values[pipeline.MAX_TASKS_ENV] = str(args.max_tasks)
     path = jobs.write_config(values)
     emit({"config": str(path), "settings": jobs.load_config()})
     return 0
@@ -196,7 +198,8 @@ def _page_text(manifest: dict[str, Any]) -> str:
 def cmd_plan_segment(args: argparse.Namespace) -> int:
     manifest = jobs.read_manifest(args.job)
     language = args.language or manifest.get("source_language") or "English"
-    emit(pipeline.plan_segment(args.job, language=language, size=args.size))
+    emit(pipeline.plan_segment(args.job, language=language, size=args.size,
+                               max_tasks=args.max_tasks))
     return 0
 
 
@@ -223,6 +226,7 @@ def cmd_plan_translate(args: argparse.Namespace) -> int:
         instructions=manifest.get("style") or "",
         page_text="" if args.no_page_text else _page_text(manifest),
         size=args.size,
+        max_tasks=args.max_tasks,
     ))
     return 0
 
@@ -244,6 +248,7 @@ def cmd_plan_proofread(args: argparse.Namespace) -> int:
         page_text="" if args.no_page_text else _page_text(manifest),
         size=args.size,
         only=args.only,
+        max_tasks=args.max_tasks,
     ))
     return 0
 
@@ -316,6 +321,7 @@ def cmd_plan_summarize(args: argparse.Namespace) -> int:
         language=args.language or manifest.get("source_language") or "English",
         instructions=args.style or "",
         seconds=args.seconds,
+        max_tasks=args.max_tasks,
     ))
     return 0
 
@@ -419,6 +425,16 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(handler=handler)
         return p
 
+    def plan_command(name: str, handler, help_text: str) -> argparse.ArgumentParser:
+        p = job_command(name, handler, help_text)
+        p.add_argument(
+            "--max-tasks", type=int,
+            help=f"most workers this harness runs at once; defaults to "
+                 f"${pipeline.MAX_TASKS_ENV}. Batches grow to fit before waves are "
+                 f"suggested.",
+        )
+        return p
+
     p = sub.add_parser("doctor", help="report what is installed and which ASR providers are ready")
     p.add_argument("--live", action="store_true",
                    help="also send a one second clip to each cloud provider to prove the key works")
@@ -427,6 +443,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("configure", help="record the artifacts directory and default ASR provider")
     p.add_argument("--artifacts", help="directory jobs are created in")
     p.add_argument("--provider", choices=asr.backend_names(), help="default ASR provider")
+    p.add_argument("--max-tasks", type=int,
+                   help="most workers this harness runs at once, for example 10 on Hermes")
     p.set_defaults(handler=cmd_configure)
 
     p = sub.add_parser("install-agents", help="write the worker definitions for a harness")
@@ -457,12 +475,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="cut the audio even when the provider does not need it; "
                         "faster on long media, slightly worse at the seams")
 
-    p = job_command("plan-segment", cmd_plan_segment, "write cue-splitting tasks")
+    p = plan_command("plan-segment", cmd_plan_segment, "write cue-splitting tasks")
     p.add_argument("--language")
     p.add_argument("--size", type=int, default=pipeline.WORDS_PER_SEGMENT_TASK)
     job_command("apply-segment", cmd_apply_segment, "build cues from the segment results")
 
-    p = job_command("plan-translate", cmd_plan_translate, "write translation tasks")
+    p = plan_command("plan-translate", cmd_plan_translate, "write translation tasks")
     p.add_argument("--target-language", required=True)
     p.add_argument("--source-language")
     p.add_argument("--style", help="tone, localization and terminology instructions")
@@ -470,7 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-page-text", action="store_true")
     job_command("apply-translate", cmd_apply_translate, "merge the translation results")
 
-    p = job_command("plan-proofread", cmd_plan_proofread, "write proofreading tasks")
+    p = plan_command("plan-proofread", cmd_plan_proofread, "write proofreading tasks")
     p.add_argument("--size", type=int, default=pipeline.CUES_PER_PROOFREAD_TASK)
     p.add_argument("--only", type=int, nargs="*", help="cue ids to revisit instead of all")
     p.add_argument("--no-page-text", action="store_true")
@@ -482,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     job_command("verify", cmd_verify, "check the finished translation mechanically")
 
-    p = job_command("plan-summarize", cmd_plan_summarize, "write per-part summary tasks")
+    p = plan_command("plan-summarize", cmd_plan_summarize, "write per-part summary tasks")
     p.add_argument("--language")
     p.add_argument("--style")
     p.add_argument("--seconds", type=int, default=pipeline.SUMMARY_SECONDS_PER_TASK)

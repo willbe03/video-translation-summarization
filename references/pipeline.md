@@ -31,9 +31,14 @@ A model stage is always three moves.
 
 1. `plan-<stage>` slices the work into task directories and prints the agent to
    launch and a `dispatch` list of brief paths.
-2. Launch one worker per brief path, all at once, the way
-   your harness file describes. Give each worker its brief path and nothing
-   else, with the worker instructions above it when it has no definition.
+2. Launch one worker per brief path, all at once, the way your harness file
+   describes. Give each worker its brief path and nothing else, with the worker
+   instructions above it when it has no definition.
+
+   When the plan reports `waves` above one, it also reports `dispatch_at_once`.
+   Send that many, wait for them, send the next group, and only run `apply`
+   after the last one. Everything a worker writes stays in its own directory,
+   so waves cost nothing but wall clock.
 3. `apply-<stage>` reads every result, checks it, and writes the next artifact.
    If it exits non-zero, read the message: it names the task that broke.
 
@@ -180,10 +185,27 @@ result file. Read that one file, fix what it names if you can, and re-dispatch.
 If `$VS new` fails on a URL, the download was blocked, not the skill. Say so
 and ask the user for a file instead of retrying variations.
 
+## Long videos
+
+Nothing about the pipeline changes with length, but the task counts grow. At
+the rate measured on a real recording, ninety minutes is roughly fourteen
+thousand words and fourteen hundred cues, which at the default batch sizes
+would be thirty six segmentation tasks and thirty six translation tasks.
+
+That is more than some harnesses will run at once, so `--max-tasks` exists and
+is set at install. With it set to ten, that same video plans twelve
+segmentation tasks in two waves and ten translation tasks in one, because the
+batches grow rather than the queue. Read `waves` in the plan output and follow
+it; do not try to work it out from the task count.
+
 ## Options worth knowing
 
 - `--size` on any plan command changes how many rows a worker gets. Smaller
   means more workers and more parallelism but less context for continuity.
+- `--max-tasks` is how many workers this harness runs at once. A plan grows its
+  batches to fit inside that number before it asks you to work in waves,
+  because fewer larger tasks also read better across cue boundaries. It is set
+  once at install, so you rarely pass it.
 - `--split-seconds` on `asr` cuts the audio for a provider that would otherwise
   take the whole file. It is faster on long media and slightly worse at the
   seams, so use it when the user cares more about wall clock than the last

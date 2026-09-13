@@ -23,6 +23,18 @@ Put every task for a stage in one call. A child spawned from a subagent returns
 its result inside your own turn, which is what makes the orchestrator able to
 wait for a whole stage.
 
+`delegate_task` refuses a call carrying more tasks than
+`delegation.max_concurrent_children`, which defaults to ten. Set that number at
+install so the planner sizes its batches to fit:
+
+```bash
+uv run --project scripts/vstudio vstudio configure --max-tasks 10
+```
+
+After that a plan either fits in one call or tells you how many to send per
+group. A ninety minute video plans ten translation tasks rather than thirty
+six, because the batches grow instead of the queue.
+
 ## What this harness enforces
 
 Not the exec ban, and there is no definition file that could. Hermes derives a
