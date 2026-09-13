@@ -73,14 +73,21 @@ def test_a_local_file_goes_all_the_way_to_subtitles(run, media, capsys, tmp_path
 
     assert run("asr", job, "--provider", "recorded")["words"] == len(SPOKEN)
 
+    assert run("plan-glossary", job, "--target-language", "Chinese",
+               "--style", "keep it casual")["agent"] == "vstudio-worker-deep"
     plan = run("plan-segment", job)
     assert plan["agent"] == "vstudio-worker-light" and plan["parallel"] is True
+    assert plan["glossary_slot"] is True
     for directory in tasks.task_dirs(job, "segment"):
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        write_lines(directory, cue_lines([r["text"] for r in rows], 10))
+        words = (directory / "payload.txt").read_text(encoding="utf-8").split()
+        write_lines(directory, cue_lines(words, 10))
     cue_count = run("apply-segment", job)["cues"]
+    write_result(tasks.task_dirs(job, "glossary")[0],
+                 {"entries": [{"source": "e-reader", "kind": "term", "translation": "电子阅读器"}]})
+    assert run("apply-glossary", job)["entries"] == 1
 
     run("plan-translate", job, "--target-language", "Chinese", "--style", "keep it casual")
+    assert "e-reader = 电子阅读器" in (tasks.task_dirs(job, "translate")[0] / "brief.md").read_text()
     for directory in tasks.task_dirs(job, "translate"):
         rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
         write_lines(directory, [f"{r['id']}\t译{r['id']}" for r in rows])
@@ -92,6 +99,10 @@ def test_a_local_file_goes_all_the_way_to_subtitles(run, media, capsys, tmp_path
         write_result(directory, {"checked": len(ids), "cues": []})
     run("apply-proofread", job)
 
+    assert run("plan-cohere", job)["cues"] == cue_count
+    write_result(tasks.task_dirs(job, "cohere")[0], {"checked": cue_count, "cues": []})
+    run("apply-cohere", job)
+
     subtitles = Path(run("render", job)["subtitles"])
     dialogue = [l for l in subtitles.read_text(encoding="utf-8-sig").splitlines()
                 if l.startswith("Dialogue:")]
@@ -100,6 +111,9 @@ def test_a_local_file_goes_all_the_way_to_subtitles(run, media, capsys, tmp_path
     report = run("verify", job)
     assert report["ok"], report["failures"]
     assert run("status", job)["artifacts"]["final"] is True
+    measured = run("glossary-report", job)
+    assert measured["entries"] == 1 and set(measured["adherence"]) == {"translated", "proofread", "final"}
+    assert measured["coherence"] == {"translations_changed": 0, "typography_only": 0, "touching_glossary": 0}
 
 
 def test_the_style_instruction_reaches_the_worker_brief(run, media):
@@ -107,8 +121,7 @@ def test_the_style_instruction_reaches_the_worker_brief(run, media):
     run("asr", job, "--provider", "recorded")
     run("plan-segment", job)
     for directory in tasks.task_dirs(job, "segment"):
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        write_lines(directory, [" ".join(r["text"] for r in rows)])
+        write_lines(directory, [(directory / "payload.txt").read_text(encoding="utf-8")])
     run("apply-segment", job)
     run("plan-translate", job, "--target-language", "Chinese",
         "--style", "translate gg as gg, never good game")
@@ -157,8 +170,7 @@ def test_the_timing_table_separates_the_worker_round_from_the_checking(run, medi
     run("asr", job, "--provider", "recorded")
     run("plan-segment", job)
     for directory in tasks.task_dirs(job, "segment"):
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        write_lines(directory, [" ".join(r["text"] for r in rows)])
+        write_lines(directory, [(directory / "payload.txt").read_text(encoding="utf-8")])
     run("apply-segment", job)
     steps = [e["step"] for e in json.loads((job / "timing.json").read_text())]
     assert "asr" in steps and "dispatch-segment" in steps and "apply-segment" in steps

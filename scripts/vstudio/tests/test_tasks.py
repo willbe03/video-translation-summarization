@@ -16,6 +16,13 @@ def test_a_brief_never_carries_the_payload(tmp_path):
     assert tasks.STAGES["translate"].result in brief
 
 
+def test_a_text_payload_is_written_as_plain_text_and_named_in_the_brief(tmp_path):
+    directory = tasks.write_task(tmp_path, "segment", 0, 1, instructions="go", payload="some words")
+    assert (directory / "payload.txt").read_text(encoding="utf-8") == "some words"
+    assert not (directory / "payload.jsonl").exists()
+    assert "payload.txt" in (directory / "brief.md").read_text()
+
+
 def test_the_brief_forbids_reading_anything_else(tmp_path):
     directory = tasks.write_task(tmp_path, "translate", 0, 1, instructions="go", payload=[])
     brief = " ".join((directory / "brief.md").read_text().split())

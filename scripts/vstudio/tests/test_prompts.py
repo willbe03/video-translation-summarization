@@ -30,8 +30,41 @@ def test_no_prompt_licenses_a_canonical_rewrite():
         prompts.proofread(source_language="English", target_language="Chinese"),
         prompts.summarize(language="English"),
         prompts.synthesize(title="t", language="English"),
+        prompts.glossary(source_language="English", target_language="Chinese"),
+        prompts.cohere(source_language="English", target_language="Chinese"),
     ])
     assert "canonical" not in every.lower()
+
+
+def test_the_glossary_worker_reads_everything_and_invents_nothing():
+    body = prompts.glossary(source_language="Japanese", target_language="Chinese")
+    assert "Read the whole transcript before writing anything" in body
+    assert "Never invent a name or an alias the transcript does not contain" in body
+
+
+def test_coherence_changes_translations_and_never_the_source():
+    body = prompts.cohere(source_language="Japanese", target_language="Chinese", glossary="a = b [term]")
+    assert "Do not touch the source" in body
+    assert "Change a translation only where it is inconsistent" in body
+    assert "a = b [term]" in body
+
+
+def test_the_glossary_reaches_a_brief_only_when_there_is_one():
+    with_glossary = prompts.translate(source_language="Japanese", target_language="Chinese",
+                                      glossary="a = b [term]")
+    assert "Glossary for this whole video" in with_glossary and "a = b [term]" in with_glossary
+    assert "Glossary" not in prompts.translate(source_language="Japanese", target_language="Chinese")
+
+
+def test_only_the_proofreader_keeps_glossary_spellings_in_the_source():
+    rule = "In the source write a listed name the way the first form on its line writes it"
+    assert rule in prompts.proofread(source_language="Japanese", target_language="Chinese", glossary="a = b")
+    assert rule not in prompts.translate(source_language="Japanese", target_language="Chinese", glossary="a = b")
+
+
+def test_the_glossary_worker_is_told_an_alias_must_stand_on_its_own():
+    body = prompts.glossary(source_language="Japanese", target_language="Chinese")
+    assert "never list a fragment that also\noccurs inside another name" in body
 
 
 def test_page_text_is_admitted_for_spelling_only():
@@ -58,6 +91,7 @@ def test_the_mechanical_stage_asks_the_worker_not_to_deliberate():
     harnesses cannot set one per task, so the prompt is the only portable way
     to keep the cheap stage cheap."""
     body = prompts.segment(language="English")
+    assert "A line break in the payload marks where the speaker paused" in body
     assert "This is a mechanical pass" in body
     assert "Do not deliberate" in body
     for other in (

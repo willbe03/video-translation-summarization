@@ -5,7 +5,7 @@
 - How to run a command
 - The rhythm of every stage
 - Steps 1 and 2: acquire and transcribe, both branches
-- Subtitles: segment, translate, proofread, render, verify
+- Subtitles: glossary and segment, translate, proofread, cohere, render, verify
 - Summary: notes, synthesis, coverage
 - Finishing
 - When a stage fails
@@ -33,12 +33,14 @@ easy to lose your place in, and the step most often skipped is the last one.
 Subtitles:
 - [ ] new           acquire, and check which audio track it picked
 - [ ] asr           transcribe
-- [ ] plan-segment  -> dispatch -> apply-segment
+- [ ] plan-glossary, plan-segment -> dispatch both together
+- [ ] apply-segment, apply-glossary
 - [ ] plan-translate -> dispatch -> apply-translate
 - [ ] plan-proofread -> dispatch -> apply-proofread
-- [ ] render
-- [ ] verify        read the adjudicate list, rerun cues that need it
-- [ ] timing        report paths and the table
+- [ ] render, verify  read the adjudicate list, rerun cues that need it
+- [ ] plan-cohere    -> dispatch -> apply-cohere
+- [ ] render, verify  again after coherence
+- [ ] timing, glossary-report  report paths and both tables
 
 Summary:
 - [ ] new           acquire, and check which audio track it picked
@@ -111,15 +113,33 @@ endpoint takes, and under 192 kbps, is copied rather than re-encoded. Anything
 richer or in another codec is converted once to 192 kbps Opus. The output
 reports `uploaded_format` and `uploaded_bytes`.
 
-## Subtitles: segment, translate, proofread, render, verify
+## Subtitles: glossary and segment, translate, proofread, cohere, render, verify
 
 ```bash
-$VS plan-segment "$JOB"          # then dispatch, then:
+$VS plan-glossary "$JOB" --target-language "<language>" --style "<instructions>"
+$VS plan-segment "$JOB"
+# dispatch the glossary brief and the segment briefs together, then:
 $VS apply-segment "$JOB"
+$VS apply-glossary "$JOB"
 ```
 
+The glossary and segmentation run at the same time. One worker reads the whole
+ASR transcript, not the cues, and decides how every name and term is rendered,
+following `--style` where it says how names are handled. Plan it before
+`plan-segment`, which then leaves it one slot within `--concurrency`.
+`apply-glossary` reports how many entries it kept and of which kinds, how many
+characters the glossary adds to each brief, and any entry the transcript does
+not contain, which usually means an invented name. It also lists `problems`,
+such as a short form inside another entry's longer form when the longer
+rendering does not contain the shorter one. When there are
+problems, re-dispatch the glossary brief once and apply it again; if they
+remain, continue and report them. `plan-translate` refuses to
+run until the glossary is applied, and every translation and proofreading brief
+carries the whole glossary.
+
 Segmenting cuts the word stream into cues, one timed subtitle line each. A
-worker writes the transcript back
+worker receives its stretch of the transcript as plain text, with a line break
+wherever the speaker paused, and writes it back
 with a line break where each cue ends and changes nothing else, so it never
 touches an index or a timestamp. `apply-segment` aligns what it wrote against
 what the recogniser heard, which is how a dropped or invented word is reported
@@ -129,11 +149,14 @@ without spaces whatever size of word the recogniser returned, and two of their
 characters count as one word against the cue cap and the batch size.
 
 The tasks run at the same time and cannot collide. Each one owns a contiguous
-slice of the word list, sees that slice renumbered from zero, and writes only
+slice of the word list, sees only that slice's text, and writes only
 its own result file, so a worker cannot name a word another worker owns. A
 slice boundary is chosen at a sentence end wherever one is available, which is
-why a cue never has to span two tasks. `apply-segment` reports readability
-warnings, which are advisory, and any boundary it had to repair.
+why a cue never has to span two tasks. The pause threshold is the video's own
+90th percentile gap between words, held between 0.3 and 1 second, and the plan
+reports it with the number of breaks. `apply-segment` reports readability
+warnings, which are advisory, any boundary it had to repair, and
+`hanging_cues`: cues that stay on screen through a second or more of silence.
 
 ```bash
 $VS plan-translate "$JOB" --target-language "<language>" --style "<instructions>"
@@ -160,9 +183,10 @@ $VS verify "$JOB"
 ```
 
 `verify` exits non-zero on anything mechanically wrong: a moved timestamp, a
-cue not timed exactly like the ASR words it covers, an ASS dialogue line not
-timed like its cue, a comma that survived, an ASS file with the wrong number of
-lines, or a source edit that added words the speaker did not say. Cues may
+cue that does not run from the earliest start to the latest end of the ASR words
+it covers, an ASS dialogue line not timed like its cue, a comma that survived,
+an ASS file with the wrong number of lines, or a source edit that made a cue
+longer than what the speaker said. Cues may
 overlap: where two people talk at once the transcript overlaps, the cues keep
 that timing, and `verify` only counts them in `overlapping_cues`.
 
@@ -179,6 +203,21 @@ A targeted rerun adds its tasks beside the full pass rather than replacing it.
 Dispatch only the briefs it prints, then run `apply-proofread`, `render` and
 `verify` again. For each cue it covers, the rerun's answer replaces the full
 pass's, and every other cue keeps its full pass correction.
+
+```bash
+$VS plan-cohere "$JOB"
+$VS apply-cohere "$JOB"
+```
+
+Coherence runs once, after proofreading and its targeted reruns. One worker
+reads every cue with the glossary and changes translations only, where a name, a
+speaker's register or the tone differs from the rest of the video.
+`apply-cohere` writes `cues/final.json` from the proofread set and reports how
+many translations changed and how many of those only in typography: width,
+case, spacing or punctuation. Then run `render` and `verify` again. A proofread
+rerun after this point rebuilds `cues/final.json`, and `apply-proofread` then
+reports `cohere_needs_rerun`, so plan and apply coherence again before
+rendering.
 
 ## Summary: notes, synthesis, coverage
 
@@ -210,7 +249,18 @@ than raw ASR windows.
 
 ```bash
 $VS timing "$JOB"
+$VS glossary-report "$JOB"
 ```
+
+`glossary-report` measures the glossary: how many entries and of which kinds,
+the characters it adds to every translation brief, entries the transcript never
+contains, and for each stage how many cues that mention an entry use its
+rendering. A mention is counted on what the recogniser heard, so each entry has
+the same mentions at every stage, and a rendering counts as used whatever its
+width, case, spacing or punctuation. `coherence` says how many translations the
+coherence pass changed, how many only in typography, and how many changed a
+glossary rendering.
+Report its summary, and name any entry whose adherence drops between stages.
 
 The dispatch rows are wall clock, not a sum: workers run together, so a stage
 costs what its slowest worker costs. Each row also carries `first_done` and
@@ -218,7 +268,7 @@ costs what its slowest worker costs. Each row also carries `first_done` and
 `last_done` and `seconds` is time spent launching and noticing rather than
 working, which is why every worker of a stage is launched in one message.
 
-Report the output paths, that table, and anything that failed or needed a
+Report the output paths, both tables, and anything that failed or needed a
 rerun. If the user asked for a summary and the media was downloaded, offer
 `$VS cleanup "$JOB"`, which deletes downloaded media and scratch files and
 refuses to touch a file the user supplied.

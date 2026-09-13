@@ -266,6 +266,23 @@ def join_words(words: Sequence[Mapping[str, Any]]) -> str:
     return result
 
 
+# A subtitle left on screen through this much silence reads as hanging: the
+# speaker has visibly stopped and the words are still there.
+HANGING_SECONDS = 1.0
+
+
+def internal_silence(words: Sequence[Mapping[str, Any]]) -> float:
+    """The longest stretch inside a run of words during which nobody is speaking."""
+    ordered = sorted(words, key=lambda w: float(w["start"]))
+    if not ordered:
+        return 0.0
+    longest, reached = 0.0, float(ordered[0]["end"])
+    for word in ordered[1:]:
+        longest = max(longest, float(word["start"]) - reached)
+        reached = max(reached, float(word["end"]))
+    return longest
+
+
 def display_width(value: str) -> int:
     return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in value)
 
@@ -285,7 +302,7 @@ def boundary_readability_issues(
         if not selected:
             issues.append(f"cue {index} has no words")
             continue
-        duration = float(selected[-1]["end"]) - float(selected[0]["start"])
+        duration = max(float(w["end"]) for w in selected) - min(float(w["start"]) for w in selected)
         text = str(boundary.get("text") or join_words(selected))
         width = display_width(text)
         if duration > max_duration:
@@ -330,8 +347,10 @@ def build_cues(
         cues.append(
             {
                 "id": first_id + offset,
-                "start": float(selected[0]["start"]),
-                "end": float(selected[-1]["end"]),
+                # A recogniser can return words slightly out of order where
+                # speech overlaps, so a cue spans all of its words.
+                "start": min(float(w["start"]) for w in selected),
+                "end": max(float(w["end"]) for w in selected),
                 "source": strip_punctuation(source),
                 "source_exact": aligned_text,
                 "start_word": start_word,

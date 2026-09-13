@@ -46,17 +46,111 @@ def _source_reference(page_text: str) -> str:
     )
 
 
+def _glossary_block(glossary: str, *, source_spelling: bool = False) -> str:
+    """The glossary as every translating worker reads it."""
+    if not glossary.strip():
+        return ""
+    spelling = (
+        "\nIn the source write a listed name the way the first form on its line writes"
+        " it and if you believe that spelling is wrong keep it and record an uncertainty"
+        if source_spelling else ""
+    )
+    return (
+        "\n\nGlossary for this whole video"
+        "\nEach line lists how the transcript writes a name or term then = then the"
+        " rendering to use"
+        "\nEvery translation uses that rendering whenever the source mentions the name"
+        " in any listed form"
+        "\nA pronoun or an omission is fine where natural target grammar calls for one"
+        f"{spelling}"
+        f"\n{glossary}"
+    )
+
+
+def glossary(
+    *,
+    source_language: str,
+    target_language: str,
+    instructions: str = "",
+    page_text: str = "",
+) -> str:
+    return f"""Build the glossary for translating a {source_language} video into {target_language}
+
+Each payload row is one stretch of the whole transcript in order: start end text
+start and end are seconds from the beginning of the video
+The text is automatic speech recognition output so a name may be misheard or
+written more than one way
+
+Read the whole transcript before writing anything
+List every name and term a translator must render the same way every time it
+appears: people places businesses and organizations titles of works and terms
+particular to this video
+A nickname or a form of address that needs its own rendering is its own entry
+with a note naming who it refers to
+Leave out ordinary words that any translator would render the same way
+For each entry choose the one {target_language} rendering the whole video will use
+Follow the tone and localization instruction where it says how names are handled
+and use your own judgement where it says nothing
+Record every other way the transcript writes the same name as an alias
+An alias must identify the name on its own so never list a fragment that also
+occurs inside another name or inside ordinary words
+Never invent a name or an alias the transcript does not contain
+When you cannot tell how a name is written or what it refers to say so in its note
+
+Tone localization and terminology: {instructions or "none given, stay neutral"}{_source_reference(page_text)}
+
+Write result.json as
+{{"entries":[{{"source":"...","aliases":["..."],"kind":"person","translation":"...","note":"..."}}]}}
+kind is one of person place organization work term other
+Leave note empty when there is nothing to add"""
+
+
+def cohere(
+    *,
+    source_language: str,
+    target_language: str,
+    instructions: str = "",
+    glossary: str = "",
+) -> str:
+    return f"""Make a finished {source_language} to {target_language} subtitle set consistent across the whole video
+
+Each payload row is one cue in order: id source translation
+Different workers translated and proofread separate stretches so the same name
+or the same speaker can read differently from one stretch to the next
+
+Read every row before changing anything
+Make every name and term read the same way throughout: use the glossary
+rendering for anything in the glossary and for anything else the rendering the
+video uses most
+Keep each speaker's register and forms of address consistent and keep the whole
+set in the tone the instruction asks for
+Change a translation only where it is inconsistent with the rest of the video
+Do not retranslate a cue that is already consistent and do not change its meaning
+Do not touch the source and do not merge split reorder add or omit ids
+{PUNCTUATION_RULE}
+
+Tone localization and terminology: {instructions or "none given, stay neutral"}{_glossary_block(glossary)}
+
+Write result.json as
+{{"checked":N,"cues":[{{"id":0,"translation":"..."}}],"notes":[{{"id":0,"note":"..."}}]}}
+List in cues only the ids you changed with their full new translation
+Set checked to the number of payload rows you read
+Use notes for an inconsistency you could not resolve"""
+
+
 def segment(*, language: str) -> str:
     return f"""Split the {language} transcript into fluent on-screen subtitle cues
 
-Each payload row is one word: index text start end
-In a language written without spaces such as Chinese or Japanese a row may be a
-single character Write that text back the way it is normally written without
-adding spaces and count two characters as one word
+The payload is one stretch of the transcript as plain text
+A line break in the payload marks where the speaker paused
+End a cue at a pause unless the same sentence clearly runs on after it
+The payload's line breaks are hints and your own line breaks are the cues
 
-Write the words back out in order with a line break where each cue ends
+Write the text back in order with a line break where each cue ends
 Change nothing else Do not add omit reorder or alter a word
 Every word in the payload appears exactly once in your output in the same order
+Chinese and Japanese stay written without spaces and two of their characters
+count as one word
 
 Cut at natural grammatical and semantic boundaries rather than at fixed lengths
 Do not leave transitions conjunctions articles auxiliaries or setup words
@@ -65,7 +159,6 @@ but and if should begin the idea they introduce
 Aim for 8 to 14 words per cue and never more than {MAX_WORDS_PER_CUE}
 A cue longer than that is split in half before it reaches the screen which cuts
 it somewhere you did not choose
-Aim for 1 to 7 seconds
 
 Write one cue per line and nothing else No numbering no quotes no blank lines
 {PUNCTUATION_RULE}
@@ -80,6 +173,7 @@ def translate(
     target_language: str,
     instructions: str = "",
     page_text: str = "",
+    glossary: str = "",
 ) -> str:
     return f"""Translate subtitle cues from {source_language} to {target_language}
 
@@ -98,7 +192,7 @@ Do not merge split reorder add or omit ids and do not touch start or end
 If you would need to see the picture to translate a cue correctly translate your
 best reading and record the question
 
-Tone localization and terminology: {instructions or "none given, stay neutral"}{_source_reference(page_text)}
+Tone localization and terminology: {instructions or "none given, stay neutral"}{_source_reference(page_text)}{_glossary_block(glossary)}
 
 Write one line per cue
 the id then a tab then the translation and nothing else on the line
@@ -114,6 +208,7 @@ def proofread(
     target_language: str,
     instructions: str = "",
     page_text: str = "",
+    glossary: str = "",
 ) -> str:
     return f"""Proofread a {source_language} to {target_language} bilingual subtitle set
 
@@ -157,7 +252,7 @@ Do not leave transitions conjunctions or setup words dangling at the end of
 either language
 {PUNCTUATION_RULE}
 
-Tone localization and terminology: {instructions or "none given, stay neutral"}{_source_reference(page_text)}
+Tone localization and terminology: {instructions or "none given, stay neutral"}{_source_reference(page_text)}{_glossary_block(glossary, source_spelling=True)}
 
 Write result.json as
 {{"checked":N,"cues":[{{"id":0,"source":"...","translation":"..."}}],"uncertainties":[{{"id":0,"question":"..."}}]}}

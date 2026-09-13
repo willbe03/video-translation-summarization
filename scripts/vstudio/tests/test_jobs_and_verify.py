@@ -44,6 +44,14 @@ def test_an_added_word_is_reported_as_added():
     assert found[0]["added_words"] == 1 and found[0]["now"] == "good game"
 
 
+def test_a_moved_word_is_a_substitution_but_not_an_addition():
+    """The diff splits a move into a deletion and an insertion, and the cue did not grow."""
+    cues = [{"id": 0, "source_exact": "alpha beta gamma delta epsilon",
+             "source": "beta gamma delta alpha epsilon"}]
+    found = source_substitutions(cues)
+    assert found and all(s["added_words"] == 0 for s in found)
+
+
 def test_a_japanese_comma_swapped_for_a_space_adds_no_word():
     cues = [{"id": 0, "source_exact": "そうですね、行きましょう", "source": "そうですね 行きましょう"}]
     assert source_substitutions(cues) == []
@@ -111,6 +119,14 @@ def test_an_unspaced_cue_is_measured_in_words_against_the_cap():
 
 def _timed_words(*spans):
     return [{"text": "w", "start": start, "end": end} for start, end in spans]
+
+
+def test_a_cue_left_on_screen_through_a_silence_is_warned_about():
+    words = _timed_words((0.0, 1.0), (4.0, 5.0))
+    final = [_cue(0, 0.0, 5.0, "a b", "甲乙", start_word=0, end_word=1)]
+    report = verify_translation({}, final, final, words)
+    assert report["ok"] and report["details"]["hanging_cues"] == 1
+    assert any("through a silence" in w for w in report["warnings"])
 
 
 def test_cues_may_overlap_where_the_transcript_does():

@@ -55,9 +55,10 @@ to ask. That grants nothing else, because there is nothing else it can do.
 ## How many at once
 
 Claude Code runs at most 20 subagents at a time and refuses a launch past that.
-Plans spread work across `VSTUDIO_CONCURRENCY` workers, so on this harness it
-should be 20. If `vstudio doctor` does not list it under `settings`, pass
-`--concurrency 20` to every plan command. When a plan reports `waves`, launch
+An orchestrator running as a subagent is one of them, so it can launch 19
+workers at once. Plans spread work across `VSTUDIO_CONCURRENCY` workers, so on
+this harness it should be 19. If `vstudio doctor` does not list it under
+`settings`, pass `--concurrency 19` to every plan command. When a plan reports `waves`, launch
 one group in a single message, wait for all of it, then launch the next.
 
 ## Waiting on a long command

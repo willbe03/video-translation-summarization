@@ -66,7 +66,8 @@ WORKERS = (
     ),
     WorkerDefinition(
         "vstudio-worker-deep", "high", "opus",
-        "Proofreads subtitles or assembles a summary from a brief file. "
+        "Proofreads subtitles, builds a glossary, makes a subtitle set consistent, "
+        "or assembles a summary from a brief file. "
         "Launched by the video subtitling orchestrator, not directly.",
     ),
 )

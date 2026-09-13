@@ -20,8 +20,8 @@ def _results(job, stage, values):
 def _segment_lines(job, per_line=4):
     """Answer every segment task by writing its words back with breaks."""
     for directory in tasks.task_dirs(job, "segment"):
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        write_lines(directory, cue_lines([r["text"] for r in rows], per_line))
+        words = (directory / "payload.txt").read_text(encoding="utf-8").split()
+        write_lines(directory, cue_lines(words, per_line))
 
 
 def test_word_batches_prefer_a_sentence_end(transcribed):
@@ -338,6 +338,43 @@ def test_cue_times_are_the_asr_word_times_even_where_speech_overlaps():
     assert [(c["start"], c["end"]) for c in cues] == [(0.0, 2.5), (2.0, 4.0)]
 
 
+def _paused(job):
+    spoken = [{"index": i, "text": t, "start": s, "end": s + 0.3} for i, (t, s) in enumerate(
+        [("one", 0.0), ("two", 0.4), ("three", 0.8), ("four", 5.0), ("five", 5.4)])]
+    (job / "asr").mkdir()
+    (job / "asr" / "words.json").write_text(json.dumps({"words": spoken}), encoding="utf-8")
+    return job
+
+
+def test_the_segment_payload_breaks_the_line_where_the_speaker_paused(job):
+    plan = pipeline.plan_segment(_paused(job), language="English", size=100)
+    payload = (tasks.task_dirs(job, "segment")[0] / "payload.txt").read_text(encoding="utf-8")
+    assert payload == "one two three\nfour five"
+    assert plan["pause_breaks"] == 1 and plan["pause_threshold_seconds"] == 1.0
+
+
+def test_the_pause_threshold_follows_the_video_within_its_bounds():
+    def spaced(gap):
+        return [{"start": i * (0.3 + gap), "end": i * (0.3 + gap) + 0.3} for i in range(50)]
+    assert pipeline.pause_threshold(spaced(0.05)) == pipeline.PAUSE_FLOOR_SECONDS
+    assert pipeline.pause_threshold(spaced(2.0)) == pipeline.PAUSE_CEILING_SECONDS
+    assert pipeline.pause_threshold(spaced(0.6)) == pytest.approx(0.6)
+
+
+def test_a_cue_that_stays_on_screen_through_a_silence_is_reported(job):
+    pipeline.plan_segment(_paused(job), language="English", size=100)
+    write_lines(tasks.task_dirs(job, "segment")[0], ["one two three four five"])
+    result = pipeline.apply_segment(job)
+    assert (result["hanging_cues"], result["hanging_cue_ids"]) == (1, [0])
+
+
+def test_a_cue_spans_its_earliest_start_to_its_latest_end():
+    """Where speech overlaps, the last word can end before the first one starts."""
+    spoken = [{"text": "a", "start": 5.0, "end": 6.0}, {"text": "b", "start": 1.0, "end": 2.0}]
+    cues = build_cues(spoken, [{"start_word": 0, "end_word": 1}])
+    assert (cues[0]["start"], cues[0]["end"]) == (1.0, 6.0)
+
+
 def test_a_worker_round_separates_thinking_from_orchestrator_delay(transcribed):
     """Nothing in Python runs while workers think, so the gap between the two
     commands is the round. The result files say when the work itself ended,
@@ -373,10 +410,10 @@ def test_parallel_segment_tasks_cannot_collide(transcribed):
     for directory in directories:
         meta = json.loads((directory / "meta.json").read_text())
         ranges.append((meta["first_word"], meta["last_word"]))
-        # Each worker sees its slice renumbered from zero, so it cannot name a
-        # word outside it even by accident.
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        assert [r["index"] for r in rows] == list(range(len(rows)))
+        # Each worker sees only the text of its own slice.
+        words = json.loads((transcribed / "asr" / "words.json").read_text())["words"]
+        own = " ".join(w["text"] for w in words[meta["first_word"] : meta["last_word"] + 1])
+        assert (directory / "payload.txt").read_text(encoding="utf-8") == own
         seen.add(directory)
     ranges.sort()
     assert ranges[0][0] == 0
@@ -397,8 +434,7 @@ def test_a_worker_writing_another_slices_words_cannot_reach_them(transcribed):
     pipeline.plan_segment(transcribed, language="English", size=4)
     directories = tasks.task_dirs(transcribed, "segment")
     for index, directory in enumerate(directories):
-        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
-        texts = [r["text"] for r in rows]
+        texts = (directory / "payload.txt").read_text(encoding="utf-8").split()
         if index == 1:
             texts = texts + ["eleven", "twelve"]  # words belonging to the last task
         write_lines(directory, [" ".join(texts)])

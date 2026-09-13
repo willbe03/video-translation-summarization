@@ -16,8 +16,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from vstudio import agents, asr, jobs, pipeline, tasks
+from vstudio import agents, asr, glossary, jobs, pipeline, tasks
 from vstudio.acquire import acquire, describe_source
+from vstudio.cues import join_words
 from vstudio.media import cleanup, media_resolution, resolve_ass_ffmpeg, run, take_frame
 from vstudio.summary import check_summary
 from vstudio.timestamps import linkify_summary
@@ -29,7 +30,7 @@ def apply_stage(job: Path, stage: str, work) -> dict[str, Any]:
     dispatch = tasks.dispatch_timing(job, stage)
     with jobs.timed(job, f"apply-{stage}") as extra:
         result = work()
-        extra.update({k: v for k, v in result.items() if not isinstance(v, list)})
+        extra.update({k: v for k, v in result.items() if not isinstance(v, (list, dict))})
     if dispatch is not None:
         seconds = dispatch.pop("seconds")
         jobs.record_timing(job, f"dispatch-{stage}", seconds, **dispatch)
@@ -275,6 +276,69 @@ def cmd_apply_proofread(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_glossary(args: argparse.Namespace) -> int:
+    manifest = jobs.read_manifest(args.job)
+    jobs.update_manifest(
+        args.job,
+        source_language=args.source_language or manifest.get("source_language") or "English",
+        target_language=args.target_language,
+        style=args.style or manifest.get("style") or "",
+    )
+    manifest = jobs.read_manifest(args.job)
+    emit(pipeline.plan_glossary(
+        args.job,
+        source_language=manifest["source_language"],
+        target_language=manifest["target_language"],
+        instructions=manifest.get("style") or "",
+        page_text="" if args.no_page_text else _page_text(manifest),
+    ))
+    return 0
+
+
+def cmd_apply_glossary(args: argparse.Namespace) -> int:
+    result = apply_stage(args.job, "glossary", lambda: pipeline.apply_glossary(args.job))
+    jobs.update_manifest(args.job, glossary_entries=result["entries"])
+    emit(result)
+    return 0
+
+
+def cmd_plan_cohere(args: argparse.Namespace) -> int:
+    manifest = jobs.read_manifest(args.job)
+    emit(pipeline.plan_cohere(
+        args.job,
+        source_language=manifest.get("source_language") or "English",
+        target_language=manifest.get("target_language") or "",
+        instructions=manifest.get("style") or "",
+    ))
+    return 0
+
+
+def cmd_apply_cohere(args: argparse.Namespace) -> int:
+    result = apply_stage(args.job, "cohere", lambda: pipeline.apply_cohere(args.job))
+    jobs.update_manifest(args.job, stage="cohered")
+    emit(result)
+    return 0
+
+
+def cmd_glossary_report(args: argparse.Namespace) -> int:
+    job = args.job
+    path = job / "cues" / "glossary.json"
+    if not path.is_file():
+        raise RuntimeError(f"{job} has no applied glossary. Run plan-glossary and apply-glossary first.")
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    words = json.loads((job / "asr" / "words.json").read_text(encoding="utf-8"))["words"]
+    stages = {}
+    for name in ("translated", "proofread", "final"):
+        cues_path = job / "cues" / f"{name}.json"
+        if cues_path.is_file():
+            stages[name] = json.loads(cues_path.read_text(encoding="utf-8"))
+    measured = glossary.report(entries, join_words(words), stages)
+    if "proofread" in stages and "final" in stages:
+        measured["coherence"] = glossary.coherence_changes(entries, stages["proofread"], stages["final"])
+    emit(measured)
+    return 0
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     with jobs.timed(args.job, "render"):
         output = pipeline.render(args.job, font=args.font)
@@ -326,8 +390,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     words_path = job / "asr" / "words.json"
     words = (json.loads(words_path.read_text(encoding="utf-8"))["words"]
              if words_path.is_file() else None)
+    glossary_path = job / "cues" / "glossary.json"
+    entries = (json.loads(glossary_path.read_text(encoding="utf-8"))
+               if glossary_path.is_file() else None)
     report = verify_translation(manifest, final, draft, words,
-                                ass_dialogue_count=dialogue, ass_codec=codec, ass_times=times)
+                                ass_dialogue_count=dialogue, ass_codec=codec, ass_times=times,
+                                glossary_entries=entries)
     emit(report)
     return 0 if report["ok"] else 1
 
@@ -512,6 +580,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--only", type=int, nargs="*", help="cue ids to revisit instead of all")
     p.add_argument("--no-page-text", action="store_true")
     job_command("apply-proofread", cmd_apply_proofread, "merge the proofreading results")
+
+    p = job_command("plan-glossary", cmd_plan_glossary,
+                    "write the task that decides names and terms from the whole transcript")
+    p.add_argument("--target-language", required=True)
+    p.add_argument("--source-language")
+    p.add_argument("--style", help="tone, localization and terminology instructions")
+    p.add_argument("--no-page-text", action="store_true")
+    job_command("apply-glossary", cmd_apply_glossary, "check and store the glossary")
+
+    job_command("plan-cohere", cmd_plan_cohere,
+                "write the task that makes the whole subtitle set consistent")
+    job_command("apply-cohere", cmd_apply_cohere, "apply the coherence corrections")
+    job_command("glossary-report", cmd_glossary_report,
+                "measure the glossary and how each stage follows it")
 
     p = job_command("render", cmd_render, "write the bilingual ass file")
     p.add_argument("--font", default="Arial")

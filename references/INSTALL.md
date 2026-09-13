@@ -49,7 +49,8 @@ uv run --project scripts/vstudio vstudio configure --concurrency 10
 
 Left unset, batches fall back to a size that suits a short video, which on a
 long one means many more tasks than some harnesses accept. Claude Code runs at
-most 20 subagents at once, so use `--concurrency 20` there.
+most 20 subagents at once and the orchestrator subagent is one of them, so use
+`--concurrency 19` there.
 
 This writes `~/.config/vstudio/config.env`. A real environment variable always
 beats the file, and `--job-root` on `vstudio new` beats both, so a single job
@@ -116,8 +117,8 @@ ask and can do nothing else at all.
 
 The three workers differ in model and in how hard they think. Cutting a
 transcript into cues runs on Sonnet at low effort, translating and note-taking
-on Sonnet at high effort, and proofreading and assembling a summary on Opus at
-high effort. Sonnet is the floor: the cheap stage is cheap because it thinks
+on Sonnet at high effort, and building the glossary, proofreading, checking the
+whole set for consistency and assembling a summary on Opus at high effort. Sonnet is the floor: the cheap stage is cheap because it thinks
 less, not because it knows less.
 
 Rerun this command after updating the skill, since the orchestrator definition

@@ -15,12 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from vstudio import prompts, tasks
+from vstudio import glossary, prompts, tasks
 from vstudio.cues import (
+    HANGING_SECONDS,
     apply_translations,
+    internal_silence,
     boundary_readability_issues,
     boundaries_from_lines,
     build_cues,
+    join_words,
     lexical_weight,
     render_bilingual_ass,
     repair_boundaries,
@@ -149,6 +152,38 @@ def batch_items(items: Sequence[Any], size: int) -> list[list[Any]]:
 
 # --- segment ---
 
+# Inside a phrase a recogniser leaves gaps of a tenth of a second or two, and a
+# pause a listener notices starts around a third of a second. The threshold is
+# the video's own 90th percentile gap, which adapts to fast and slow speakers,
+# held above that floor and below the hanging threshold so that every silence
+# long enough to leave a subtitle on screen is marked.
+PAUSE_FLOOR_SECONDS = 0.3
+PAUSE_CEILING_SECONDS = HANGING_SECONDS
+
+
+def pause_threshold(words: Sequence[Mapping[str, Any]]) -> float:
+    gaps = sorted(float(b["start"]) - float(a["end"]) for a, b in zip(words, words[1:])
+                  if float(b["start"]) > float(a["end"]))
+    if not gaps:
+        return PAUSE_CEILING_SECONDS
+    return min(PAUSE_CEILING_SECONDS, max(PAUSE_FLOOR_SECONDS, gaps[int(len(gaps) * 0.9)]))
+
+
+def _text_with_pauses(words: Sequence[Mapping[str, Any]], threshold: float) -> tuple[str, int]:
+    """The words as plain text, with a line break wherever the speaker paused."""
+    lines: list[str] = []
+    current: list[Mapping[str, Any]] = []
+    reached = 0.0
+    for word in words:
+        if current and float(word["start"]) - reached >= threshold:
+            lines.append(join_words(current))
+            current = []
+        reached = max(reached, float(word["end"])) if current else float(word["end"])
+        current.append(word)
+    if current:
+        lines.append(join_words(current))
+    return "\n".join(lines), max(0, len(lines) - 1)
+
 
 def plan_segment(
     job: Path,
@@ -161,21 +196,21 @@ def plan_segment(
     words = asr["words"]
     tasks.reset_stage(job, "segment")
     limit = _concurrency(concurrency)
+    glossary_running = _glossary_running(job)
+    if glossary_running and limit and limit > 1:
+        # The glossary worker is dispatched alongside this stage and takes a slot.
+        limit -= 1
     weight = math.ceil(sum(lexical_weight(str(word["text"])) for word in words))
     size = size or batch_size(weight, SEGMENT_BATCH, limit)
     ranges = batch_words(words, size)
     instructions = prompts.segment(language=language)
     directories = []
+    characters = breaks = 0
+    threshold = pause_threshold(words)
     for index, (start, end) in enumerate(ranges):
-        payload = [
-            {
-                "index": offset,
-                "text": word["text"],
-                "start": round(float(word["start"]), 3),
-                "end": round(float(word["end"]), 3),
-            }
-            for offset, word in enumerate(words[start : end + 1])
-        ]
+        payload, pauses = _text_with_pauses(words[start : end + 1], threshold)
+        characters += len(payload)
+        breaks += pauses
         directories.append(
             tasks.write_task(
                 job, "segment", index, len(ranges),
@@ -185,7 +220,10 @@ def plan_segment(
             )
         )
     return tasks.plan(job, "segment", directories, words=len(words),
-                      words_per_task=size, **_wave_plan(len(ranges), limit))
+                      words_per_task=size, glossary_slot=glossary_running,
+                      payload_characters=characters,
+                      pause_threshold_seconds=round(threshold, 2), pause_breaks=breaks,
+                      **_wave_plan(len(ranges), limit))
 
 
 def apply_segment(job: Path) -> dict[str, Any]:
@@ -221,7 +259,10 @@ def apply_segment(job: Path) -> dict[str, Any]:
     _write(job, cues, "cues", "cues.json")
     issues = boundary_readability_issues(words, boundaries)
     _write(job, issues, "cues", "readability.json")
+    hanging = [c["id"] for c in cues
+               if internal_silence(words[c["start_word"] : c["end_word"] + 1]) >= HANGING_SECONDS]
     return {"cues": len(cues), "readability_warnings": len(issues),
+            "hanging_cues": len(hanging), "hanging_cue_ids": hanging[:20],
             "boundary_repairs": repairs}
 
 
@@ -239,6 +280,7 @@ def plan_translate(
     concurrency: int | None = None,
 ) -> dict[str, Any]:
     cues = _read(job, "cues", "cues.json")
+    entries = _glossary(job)
     tasks.reset_stage(job, "translate")
     limit = _concurrency(concurrency)
     size = size or batch_size(len(cues), TRANSLATE_BATCH, limit)
@@ -247,6 +289,7 @@ def plan_translate(
         target_language=target_language,
         instructions=instructions,
         page_text=page_text,
+        glossary=glossary.brief_block(entries),
     )
     batches = batch_items(cues, size)
     directories = [
@@ -266,7 +309,8 @@ def plan_translate(
         for index, batch in enumerate(batches)
     ]
     return tasks.plan(job, "translate", directories, cues=len(cues),
-                      cues_per_task=size, **_wave_plan(len(batches), limit))
+                      cues_per_task=size, glossary_entries=len(entries),
+                      **_wave_plan(len(batches), limit))
 
 
 def apply_translate(job: Path) -> dict[str, Any]:
@@ -368,6 +412,7 @@ def plan_proofread(
         target_language=target_language,
         instructions=instructions,
         page_text=page_text,
+        glossary=glossary.brief_block(_glossary(job)),
     )
     order = [int(c["id"]) for c in cues]
     position = {cue_id: index for index, cue_id in enumerate(order)}
@@ -434,13 +479,160 @@ def apply_proofread(job: Path) -> dict[str, Any]:
     changed = sum(by_id[i][field] != translated[i][field]
                   for i in by_id for field in ("source", "translation"))
     final = [by_id[int(c["id"])] for c in cues]
+    _write(job, final, "cues", "proofread.json")
     _write(job, final, "cues", "final.json")
     existing = _read(job, "cues", "uncertainties.json") if (job / "cues" / "uncertainties.json").is_file() else []
     # Rebuilt rather than appended, so applying again does not repeat the notes.
     kept = [u for u in existing if u.get("stage") != "proofread"]
     _write(job, kept + [{**u, "stage": "proofread"} for u in uncertainties],
            "cues", "uncertainties.json")
-    return {"cues": len(final), "fields_changed": changed, "coverage_warnings": unchecked}
+    result = {"cues": len(final), "fields_changed": changed, "coverage_warnings": unchecked}
+    if tasks.stage_root(job, "cohere").is_dir():
+        # final.json was just rebuilt from proofreading, so coherence must run again.
+        result["cohere_needs_rerun"] = True
+    return result
+
+
+# --- glossary ---
+
+# A minute of speech holds a whole exchange, and at that length the payload has
+# about as many rows as the video has minutes.
+GLOSSARY_STRETCH_SECONDS = 60.0
+
+
+def _asr_stretches(words: Sequence[Mapping[str, Any]], seconds: float) -> list[dict[str, Any]]:
+    """The recogniser's words in consecutive stretches, independent of any cues."""
+    stretches: list[list[Mapping[str, Any]]] = []
+    for word in words:
+        if not stretches or float(word["start"]) - float(stretches[-1][0]["start"]) >= seconds:
+            stretches.append([])
+        stretches[-1].append(word)
+    return [{"start": round(float(s[0]["start"]), 2), "end": round(float(s[-1]["end"]), 2),
+             "text": join_words(s)} for s in stretches]
+
+
+def _glossary_running(job: Path) -> bool:
+    return tasks.stage_root(job, "glossary").is_dir() and not (job / "cues" / "glossary.json").is_file()
+
+
+def _glossary(job: Path) -> list[dict[str, Any]]:
+    """The applied glossary, or none when the job never planned one."""
+    path = job / "cues" / "glossary.json"
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    if tasks.stage_root(job, "glossary").is_dir():
+        raise RuntimeError(
+            "the glossary is planned but not applied. Wait for its worker, run "
+            "apply-glossary, then plan this stage again."
+        )
+    return []
+
+
+def plan_glossary(
+    job: Path,
+    *,
+    source_language: str,
+    target_language: str,
+    instructions: str = "",
+    page_text: str = "",
+) -> dict[str, Any]:
+    asr = _read(job, "asr", "words.json")
+    stretches = _asr_stretches(asr["words"], GLOSSARY_STRETCH_SECONDS)
+    if not stretches:
+        raise RuntimeError("the ASR artifact holds no words to build a glossary from")
+    tasks.reset_stage(job, "glossary")
+    (job / "cues" / "glossary.json").unlink(missing_ok=True)
+    directory = tasks.write_task(
+        job, "glossary", 0, 1,
+        instructions=prompts.glossary(
+            source_language=source_language,
+            target_language=target_language,
+            instructions=instructions,
+            page_text=page_text,
+        ),
+        payload=stretches,
+    )
+    return tasks.plan(job, "glossary", [directory], stretches=len(stretches),
+                      transcript_characters=sum(len(s["text"]) for s in stretches),
+                      dispatch_with="segment")
+
+
+def apply_glossary(job: Path) -> dict[str, Any]:
+    directory = tasks.task_dirs(job, "glossary")[0]
+    entries, problems = glossary.validate(tasks.rows(tasks.read_result(directory), "entries"))
+    _write(job, entries, "cues", "glossary.json")
+    transcript = join_words(_read(job, "asr", "words.json")["words"])
+    measured = glossary.report(entries, transcript, {})
+    return {**{key: measured[key] for key in
+               ("entries", "kinds", "aliases", "brief_characters", "not_in_transcript")},
+            "problems": problems}
+
+
+# --- cohere ---
+
+
+def plan_cohere(
+    job: Path,
+    *,
+    source_language: str,
+    target_language: str,
+    instructions: str = "",
+) -> dict[str, Any]:
+    cues = _read(job, "cues", "proofread.json")
+    entries = _glossary(job)
+    tasks.reset_stage(job, "cohere")
+    payload = [{"id": int(c["id"]), "source": c["source"], "translation": c["translation"]}
+               for c in cues]
+    directory = tasks.write_task(
+        job, "cohere", 0, 1,
+        instructions=prompts.cohere(
+            source_language=source_language,
+            target_language=target_language,
+            instructions=instructions,
+            glossary=glossary.brief_block(entries),
+        ),
+        payload=payload,
+    )
+    return tasks.plan(job, "cohere", [directory], cues=len(cues), glossary_entries=len(entries),
+                      payload_characters=sum(len(json.dumps(r, ensure_ascii=False)) + 1
+                                             for r in payload))
+
+
+def apply_cohere(job: Path) -> dict[str, Any]:
+    """Apply the coherence corrections to the proofread set, translations only."""
+    cues = _read(job, "cues", "proofread.json")
+    by_id = {int(c["id"]): dict(c) for c in cues}
+    directory = tasks.task_dirs(job, "cohere")[0]
+    result = tasks.read_result(directory)
+    rows = [row for row in tasks.rows(result, "cues") if row.get("id") is not None]
+    unknown = sorted({int(row["id"]) for row in rows} - set(by_id))
+    if unknown:
+        raise RuntimeError(
+            f"{directory} returned cue ids that are not in the set, the first being "
+            f"{unknown[:10]}. Re-dispatch it."
+        )
+    changed = typography = 0
+    for row in rows:
+        target = by_id[int(row["id"])]
+        value = strip_punctuation(str(row.get("translation") or "").strip())
+        if value and value != target["translation"]:
+            typography += glossary.bare(value) == glossary.bare(target["translation"])
+            target["translation"] = value
+            changed += 1
+    checked = result.get("checked") if isinstance(result, dict) else None
+    raw_notes = result.get("notes") if isinstance(result, dict) else None
+    notes = _normalize_uncertainties(
+        {"id": n.get("id"), "question": n.get("note") or n.get("question")} if isinstance(n, dict) else n
+        for n in raw_notes or []
+    )
+    _write(job, [by_id[int(c["id"])] for c in cues], "cues", "final.json")
+    existing = _read(job, "cues", "uncertainties.json") if (job / "cues" / "uncertainties.json").is_file() else []
+    kept = [u for u in existing if u.get("stage") != "cohere"]
+    _write(job, kept + [{**u, "stage": "cohere"} for u in notes], "cues", "uncertainties.json")
+    coverage = ([] if isinstance(checked, int) and checked >= len(cues)
+                else [f"{directory.name} reported checked={checked} of {len(cues)}"])
+    return {"cues": len(cues), "translations_changed": changed, "typography_only": typography,
+            "notes": len(notes), "coverage_warnings": coverage}
 
 
 # --- render ---

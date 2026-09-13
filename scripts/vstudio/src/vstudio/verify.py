@@ -14,8 +14,11 @@ import math
 import re
 from typing import Any, Mapping, Sequence
 
+from vstudio.glossary import adherence as glossary_adherence
 from vstudio.cues import (
+    HANGING_SECONDS,
     ass_timestamp,
+    internal_silence,
     join_units,
     lexical_weight,
     split_units,
@@ -122,6 +125,9 @@ def source_substitutions(cues: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         exact, shown = _words(str(cue.get("source_exact", ""))), _words(str(cue.get("source", "")))
         if exact == shown:
             continue
+        # An edit adds words only as far as the whole cue grew, however the diff
+        # happens to split it into replacements, deletions and insertions.
+        grown = math.floor(sum(map(unit_weight, shown)) - sum(map(unit_weight, exact)))
         readings = difflib.SequenceMatcher(
             None, [_reading(u) for u in exact], [_reading(u) for u in shown]
         )
@@ -134,20 +140,21 @@ def source_substitutions(cues: Sequence[Mapping[str, Any]]) -> list[dict[str, An
                 "id": int(cue["id"]),
                 "was": join_units(exact[i1:i2]),
                 "now": join_units(shown[j1:j2]),
-                "added_words": max(0, math.floor(added)),
+                "added_words": max(0, min(math.floor(added), grown)),
             })
     return out
 
 
 def _differs_from_asr(cue: Mapping[str, Any], words: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether a cue is not timed exactly like the first and last word it covers."""
+    """Whether a cue does not run from the earliest start to the latest end of its words."""
     if cue.get("start_word") is None or cue.get("end_word") is None:
         return False
     first, last = int(cue["start_word"]), int(cue["end_word"])
     if not 0 <= first <= last < len(words):
         return True
-    return (abs(float(cue["start"]) - float(words[first]["start"])) > 1e-6
-            or abs(float(cue["end"]) - float(words[last]["end"])) > 1e-6)
+    span = words[first : last + 1]
+    return (abs(float(cue["start"]) - min(float(w["start"]) for w in span)) > 1e-6
+            or abs(float(cue["end"]) - max(float(w["end"]) for w in span)) > 1e-6)
 
 
 def longest_repaired_run(words: Sequence[Mapping[str, Any]]) -> int:
@@ -168,6 +175,7 @@ def verify_translation(
     ass_dialogue_count: int | None = None,
     ass_codec: str | None = None,
     ass_times: Sequence[tuple[str, str]] | None = None,
+    glossary_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
@@ -210,6 +218,18 @@ def verify_translation(
     )
 
     if words:
+        hanging = [
+            c["id"] for c in final
+            if c.get("start_word") is not None and c.get("end_word") is not None
+            and int(c["end_word"]) < len(words) and "start" in words[0]
+            and internal_silence(words[int(c["start_word"]) : int(c["end_word"]) + 1]) >= HANGING_SECONDS
+        ]
+        details["hanging_cues"] = len(hanging)
+        if hanging:
+            warnings.append(
+                f"{len(hanging)} cue(s) stay on screen through a silence of "
+                f"{HANGING_SECONDS:g} s or more: {hanging[:10]}"
+            )
         off_asr = [c["id"] for c in final if _differs_from_asr(c, words)]
         if off_asr:
             failures.append(
@@ -257,6 +277,17 @@ def verify_translation(
             f"{len(subs)} source substitution(s) need adjudication; each must be an ASR typo, "
             "capitalization, proper-name, terminology, or filler fix"
         )
+
+    if glossary_entries:
+        rows = glossary_adherence(glossary_entries, final)
+        missed = sorted({cue_id for row in rows.values() for cue_id in row["not_followed"]})
+        details["glossary"] = {"mentions": sum(r["mentions"] for r in rows.values()),
+                               "followed": sum(r["followed"] for r in rows.values())}
+        if missed:
+            warnings.append(
+                f"{len(missed)} cue(s) mention a glossary entry without its rendering; "
+                f"confirm each is a pronoun or an omission: {missed[:10]}"
+            )
 
     dangling = cue_coherence_issues(final)
     if dangling:

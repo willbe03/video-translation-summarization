@@ -207,6 +207,8 @@ def test_every_stage_declares_an_effort_suited_to_its_work():
     assert tasks.STAGES["segment"].effort == "low"
     assert tasks.STAGES["translate"].effort == "high"
     assert tasks.STAGES["proofread"].effort == "high"
+    for stage in ("glossary", "cohere"):
+        assert (tasks.STAGES[stage].agent, tasks.STAGES[stage].effort) == ("vstudio-worker-deep", "high")
 
 
 def test_no_worker_runs_below_sonnet():

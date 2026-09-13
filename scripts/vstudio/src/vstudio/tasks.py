@@ -21,6 +21,7 @@ from typing import Any, Iterable, Sequence
 
 BRIEF = "brief.md"
 PAYLOAD = "payload.jsonl"
+PAYLOAD_TEXT = "payload.txt"
 RESULT_JSON = "result.json"
 RESULT_MARKDOWN = "result.md"
 RESULT_TEXT = "result.txt"
@@ -51,6 +52,12 @@ STAGES: dict[str, Stage] = {
     # The proofreader is the only stage that can silently damage the speaker's
     # words, so it gets the most capable model as well as the effort.
     "proofread": Stage("proofread", "vstudio-worker-deep", "high", "repair ASR and polish"),
+    # A name has to read the same everywhere, and only a reader who sees every
+    # use can decide how, so one worker reads the whole transcript.
+    "glossary": Stage("glossary", "vstudio-worker-deep", "high", "decide names and terms"),
+    # The only stage that sees every cue at once, so tone and names can be made
+    # consistent across stretches no single proofreader saw.
+    "cohere": Stage("cohere", "vstudio-worker-deep", "high", "make the whole set consistent"),
     "summarize": Stage(
         "summarize", "vstudio-worker-standard", "high", "note one part", RESULT_MARKDOWN
     ),
@@ -65,12 +72,11 @@ def stage_root(job: Path, stage: str) -> Path:
 
 
 def _frame(
-    instructions: str, *, stage: str, index: int, count: int, rows: int, result: str
+    instructions: str, *, stage: str, index: int, count: int, reading: str, result: str
 ) -> str:
     return f"""# {stage} task {index + 1} of {count}
 
-Read `{PAYLOAD}` in this directory. It holds {rows} {"row" if rows == 1 else "rows"},
-one JSON object per line.
+{reading}
 Write your answer to `{result}` in this directory, in the shape described below
 and nothing else.
 Reply with one line saying what you wrote. Do not paste the answer into your
@@ -97,16 +103,25 @@ def write_task(
 ) -> Path:
     directory = stage_root(job, stage) / f"{index:03d}"
     directory.mkdir(parents=True, exist_ok=True)
-    rows = len(payload) if isinstance(payload, list) else 1
-    # One object per line rather than indented JSON: a worker reads the whole
-    # payload, and indenting it costs roughly four times the tokens.
-    lines = payload if isinstance(payload, list) else [payload]
-    (directory / PAYLOAD).write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in lines), encoding="utf-8"
-    )
+    for name in (PAYLOAD, PAYLOAD_TEXT):
+        (directory / name).unlink(missing_ok=True)
+    if isinstance(payload, str):
+        # A stage that only needs the words gets them as written, without the
+        # per-row structure a JSON payload spends tokens on.
+        (directory / PAYLOAD_TEXT).write_text(payload, encoding="utf-8")
+        reading = f"Read `{PAYLOAD_TEXT}` in this directory. It holds plain text."
+    else:
+        rows = payload if isinstance(payload, list) else [payload]
+        # One object per line rather than indented JSON: a worker reads the whole
+        # payload, and indenting it costs roughly four times the tokens.
+        (directory / PAYLOAD).write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8"
+        )
+        reading = (f"Read `{PAYLOAD}` in this directory. It holds {len(rows)} "
+                   f"{'row' if len(rows) == 1 else 'rows'}, one JSON object per line.")
     result = STAGES[stage].result
     (directory / BRIEF).write_text(
-        _frame(instructions, stage=stage, index=index, count=count, rows=rows, result=result),
+        _frame(instructions, stage=stage, index=index, count=count, reading=reading, result=result),
         encoding="utf-8",
     )
     if meta:
