@@ -19,9 +19,13 @@ Every command below is run from the skill directory:
 uv run --project scripts/vstudio vstudio <command> ...
 ```
 
-Set `VS="uv run --project scripts/vstudio vstudio"` once and use `$VS` after
-that. Every command prints JSON on stdout. Read that JSON; do not go looking in
-the job directory for the same answer.
+Every command below is written as `$VS <command>`, which stands for
+`uv run --project scripts/vstudio vstudio <command>` run from the skill
+directory. Write it out in full in each command rather than storing it in a
+variable: a shell variable does not survive from one tool call to the next, and
+zsh, the default shell on macOS, does not split `$VS` into words, so `$VS
+"$JOB"` fails there. Every command prints JSON on stdout. Read that JSON; do not
+go looking in the job directory for the same answer.
 
 Copy the checklist for your branch and tick items off as you go. A long job is
 easy to lose your place in, and the step most often skipped is the last one.
@@ -95,6 +99,11 @@ This is the longest step and it has no model in it. The provider chosen at
 install is used unless you pass `--provider`. It prints the word count, the
 detected language, and its own internal timings.
 
+Wait for it in the same turn. Nothing wakes an orchestrator that ended its turn
+while a command it started outside the harness is still running, so ending the
+turn to wait ends the job. Never start it with `&` or `nohup`; your harness file
+says how to wait on a long command.
+
 If the source language matters and the user told you, pass a locale:
 `--language en-US`. Otherwise let it detect.
 
@@ -116,7 +125,10 @@ Segmenting cuts the word stream into cues. A worker writes the transcript back
 with a line break where each cue ends and changes nothing else, so it never
 touches an index or a timestamp. `apply-segment` aligns what it wrote against
 what the recogniser heard, which is how a dropped or invented word is reported
-with a position instead of silently shifting every cue after it.
+with a position instead of silently shifting every cue after it. Chinese and
+Japanese are aligned a character at a time, because a worker writes them
+without spaces whatever size of word the recogniser returned, and two of their
+characters count as one word against the cue cap and the batch size.
 
 The tasks run at the same time and cannot collide. Each one owns a contiguous
 slice of the word list, sees that slice renumbered from zero, and writes only
@@ -150,9 +162,11 @@ $VS verify "$JOB"
 ```
 
 `verify` exits non-zero on anything mechanically wrong: a moved timestamp, a
-cue that overlaps its neighbour, a comma that survived, an ASS file with the
-wrong number of lines, or a source edit that added words the speaker did not
-say. Its `adjudicate` list is every place the displayed source diverged from
+cue or subtitle line not timed exactly like the ASR words it covers, a comma
+that survived, an ASS file with the wrong number of lines, or a source edit that
+added words the speaker did not say. Cues may overlap. Where two people talk at
+once the transcript overlaps, the subtitles keep that timing, and `verify`
+only counts those cues in `overlapping_cues`. Its `adjudicate` list is every place the displayed source diverged from
 what the recogniser heard. Read that list yourself. Each entry should be a
 mishearing, a spelling, a proper name, or filler removal. Anything else is the
 proofreader editing the speaker, and those cues get a targeted rerun:
@@ -160,6 +174,11 @@ proofreader editing the speaker, and those cues get a targeted rerun:
 ```bash
 $VS plan-proofread "$JOB" --only 41 88 209
 ```
+
+A targeted rerun adds its tasks beside the full pass rather than replacing it.
+Dispatch only the briefs it prints, then run `apply-proofread`, `render` and
+`verify` again. For each cue it covers, the rerun's answer replaces the full
+pass's, and every other cue keeps its full pass correction.
 
 ## Summary: notes, synthesis, coverage
 
@@ -264,3 +283,4 @@ reports `waves`. Follow it rather than working it out from the task count.
 
 Rerunning a plan command deletes every result for that stage, including ones
 that were fine. Use it to change a parameter, never to retry one worker.
+`plan-proofread --only` is the one exception, described above.

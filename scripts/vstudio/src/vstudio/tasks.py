@@ -152,10 +152,13 @@ def plan(job: Path, stage: str, directories: Sequence[Path], **extra: Any) -> di
 
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
+# A worker sometimes leaves the closing tag of its own file write, such as
+# </content>, on a line by itself.
+_STRAY_TAG = re.compile(r"^(?:<|&lt;)/?[A-Za-z_][\w-]*(?:>|&gt;)$")
 
 
 def read_lines_result(directory: Path) -> list[str]:
-    """One worker's answer as non-blank lines, fences and numbering removed."""
+    """One worker's answer as non-blank lines, without fences or stray tags."""
     path = directory / RESULT_TEXT
     if not path.is_file():
         raise RuntimeError(
@@ -165,6 +168,7 @@ def read_lines_result(directory: Path) -> list[str]:
     lines = [
         line.strip() for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("```")
+        and not _STRAY_TAG.match(line.strip())
     ]
     if not lines:
         raise RuntimeError(f"{path} is empty. Re-dispatch {directory.name}.")
@@ -241,9 +245,9 @@ def dispatch_timing(job: Path, stage: str) -> dict[str, Any] | None:
         path.stat().st_mtime
         for directory in stage_root(job, stage).iterdir() if directory.is_dir()
         for path in (directory / RESULT_JSON, directory / RESULT_MARKDOWN, directory / RESULT_TEXT)
-        if path.is_file()
+        if path.is_file() and path.stat().st_mtime >= started
     ]
-    timing: dict[str, Any] = {"seconds": round(time.time() - started, 3)}
+    timing: dict[str, Any] = {"seconds": round(time.time() - started, 3), "tasks": len(finished)}
     if finished:
         timing["first_done"] = round(min(finished) - started, 3)
         timing["last_done"] = round(max(finished) - started, 3)

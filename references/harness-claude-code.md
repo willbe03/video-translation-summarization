@@ -52,3 +52,19 @@ harness here where the exec ban is real rather than requested.
 
 `permissionMode: acceptEdits` lets a worker write its result without stopping
 to ask. That grants nothing else, because there is nothing else it can do.
+
+## How many at once
+
+Claude Code runs at most 20 subagents at a time and refuses a launch past that.
+Plans spread work across `VSTUDIO_CONCURRENCY` workers, so on this harness it
+should be 20. If `vstudio doctor` does not list it under `settings`, pass
+`--concurrency 20` to every plan command. When a plan reports `waves`, launch
+one group in a single message, wait for all of it, then launch the next.
+
+## Waiting on a long command
+
+`asr` can run for many minutes. Run it with the Bash tool in the foreground and
+`timeout: 600000`. A command that outlives the timeout is moved to the
+background as a tracked task, and you are notified when it exits, so you can
+wait for that notification. A process started with `&` or `nohup` is invisible
+to the harness: nothing will tell you it finished.

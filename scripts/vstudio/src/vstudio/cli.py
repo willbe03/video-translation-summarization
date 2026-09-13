@@ -32,8 +32,7 @@ def apply_stage(job: Path, stage: str, work) -> dict[str, Any]:
         extra.update({k: v for k, v in result.items() if not isinstance(v, list)})
     if dispatch is not None:
         seconds = dispatch.pop("seconds")
-        jobs.record_timing(job, f"dispatch-{stage}", seconds,
-                           tasks=len(tasks.task_dirs(job, stage)), **dispatch)
+        jobs.record_timing(job, f"dispatch-{stage}", seconds, **dispatch)
     return result
 
 
@@ -316,16 +315,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
     draft_path = job / "cues" / "translated.json"
     draft = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
     subs = manifest.get("subtitles")
-    dialogue = codec = None
+    dialogue = codec = times = None
     if subs and Path(subs).is_file():
         text = Path(subs).read_text(encoding="utf-8-sig")
-        dialogue = sum(1 for line in text.splitlines() if line.startswith("Dialogue:"))
+        events = [line[len("Dialogue:"):].split(",", 3) for line in text.splitlines()
+                  if line.startswith("Dialogue:")]
+        dialogue = len(events)
+        times = [(event[1].strip(), event[2].strip()) for event in events if len(event) > 2]
         codec = "ass" if "[V4+ Styles]" in text else "unknown"
     words_path = job / "asr" / "words.json"
     words = (json.loads(words_path.read_text(encoding="utf-8"))["words"]
              if words_path.is_file() else None)
     report = verify_translation(manifest, final, draft, words,
-                                ass_dialogue_count=dialogue, ass_codec=codec)
+                                ass_dialogue_count=dialogue, ass_codec=codec, ass_times=times)
     emit(report)
     return 0 if report["ok"] else 1
 
@@ -363,8 +365,7 @@ def cmd_apply_synthesize(args: argparse.Namespace) -> int:
     with jobs.timed(args.job, "apply-synthesize"):
         output = pipeline.apply_synthesize(args.job)
     if dispatch is not None:
-        jobs.record_timing(args.job, "dispatch-synthesize", dispatch.pop("seconds"),
-                           tasks=1, **dispatch)
+        jobs.record_timing(args.job, "dispatch-synthesize", dispatch.pop("seconds"), **dispatch)
     manifest = jobs.read_manifest(args.job)
     text = output.read_text(encoding="utf-8")
     url, site = str(manifest.get("url") or ""), str(manifest.get("site") or "")

@@ -9,6 +9,7 @@ model to notice.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from vstudio.cues import (
     boundary_readability_issues,
     boundaries_from_lines,
     build_cues,
+    lexical_weight,
     render_bilingual_ass,
     repair_boundaries,
     strip_punctuation,
@@ -113,17 +115,25 @@ _TERMINAL = (".", "?", "!", "。", "？", "！")
 
 
 def batch_words(words: Sequence[Mapping[str, Any]], size: int) -> list[tuple[int, int]]:
-    """Contiguous word ranges of about `size`, ending at a sentence where possible."""
+    """Contiguous word ranges of about `size`, ending at a sentence where possible.
+
+    Size is measured with `lexical_weight`, so a recogniser that returns
+    Japanese a character at a time still gets batches of about `size` words.
+    """
+    weights = [lexical_weight(str(word.get("text", ""))) for word in words]
     ranges: list[tuple[int, int]] = []
     start = 0
     total = len(words)
     while start < total:
-        end = min(start + size, total) - 1
+        end, filled = start, weights[start]
+        while end + 1 < total and filled + weights[end + 1] <= size:
+            end += 1
+            filled += weights[end]
         if end < total - 1:
             # Walk back looking for a sentence end, but never shorten a batch by
             # more than a quarter: landing mid-clause costs less than halving
             # the context a worker gets to read.
-            floor = max(start, end - max(1, size // 4))
+            floor = max(start, end - max(1, (end - start + 1) // 4))
             for index in range(end, floor - 1, -1):
                 if str(words[index].get("text", "")).rstrip().endswith(_TERMINAL):
                     end = index
@@ -151,7 +161,8 @@ def plan_segment(
     words = asr["words"]
     tasks.reset_stage(job, "segment")
     limit = _concurrency(concurrency)
-    size = size or batch_size(len(words), SEGMENT_BATCH, limit)
+    weight = math.ceil(sum(lexical_weight(str(word["text"])) for word in words))
+    size = size or batch_size(weight, SEGMENT_BATCH, limit)
     ranges = batch_words(words, size)
     instructions = prompts.segment(language=language)
     directories = []
@@ -191,7 +202,8 @@ def apply_segment(job: Path) -> dict[str, Any]:
         if not local:
             raise RuntimeError(f"{directory} proposed no cue boundaries. Re-dispatch it.")
         repaired, repair_notes = repair_boundaries(
-            local, count, max_words=prompts.MAX_WORDS_PER_CUE
+            local, count, max_words=prompts.MAX_WORDS_PER_CUE,
+            weights=[lexical_weight(str(w["text"])) for w in words[offset : offset + count]],
         )
         local = repaired
         repairs.extend(f"{directory.name}: {note}" for note in notes + repair_notes)
@@ -278,7 +290,7 @@ def apply_translate(job: Path) -> dict[str, Any]:
         )
     translated = apply_translations(cues, translations)
     _write(job, translated, "cues", "translated.json")
-    _write(job, uncertainties, "cues", "uncertainties.json")
+    _write(job, [{**u, "stage": "translate"} for u in uncertainties], "cues", "uncertainties.json")
     return {"cues": len(translated), "uncertainties": len(uncertainties)}
 
 
@@ -343,7 +355,12 @@ def plan_proofread(
     selected = [c for c in cues if only is None or int(c["id"]) in set(only)]
     if not selected:
         raise RuntimeError("no cues selected for proofreading")
-    tasks.reset_stage(job, "proofread")
+    # A targeted rerun sits beside the full pass rather than replacing it, and
+    # apply lets the later task win for every cue it covers.
+    root = tasks.stage_root(job, "proofread")
+    if only is None or not root.is_dir():
+        tasks.reset_stage(job, "proofread")
+    offset = len(tasks.task_dirs(job, "proofread")) if root.is_dir() else 0
     limit = _concurrency(concurrency)
     size = size or batch_size(len(selected), PROOFREAD_BATCH, limit)
     body = prompts.proofread(
@@ -366,7 +383,7 @@ def plan_proofread(
         payload += [_proof_row(by_id[i], context=True) for i in after]
         directories.append(
             tasks.write_task(
-                job, "proofread", index, len(batches),
+                job, "proofread", offset + index, offset + len(batches),
                 instructions=body,
                 payload=payload,
                 meta={"ids": ids},
@@ -385,18 +402,23 @@ def _proof_row(cue: Mapping[str, Any], *, context: bool = False) -> dict[str, An
 
 def apply_proofread(job: Path) -> dict[str, Any]:
     cues = _read(job, "cues", "translated.json")
+    translated = {int(c["id"]): dict(c) for c in cues}
     by_id = {int(c["id"]): dict(c) for c in cues}
-    changed = 0
     unchecked: list[str] = []
     uncertainties: list[dict[str, Any]] = []
     for directory in tasks.task_dirs(job, "proofread"):
         result = tasks.read_result(directory)
         assigned = set(json.loads((directory / "meta.json").read_text(encoding="utf-8"))["ids"])
+        uncertainties = [u for u in uncertainties if u["id"] not in assigned]
         if isinstance(result, dict):
             uncertainties.extend(_normalize_uncertainties(result.get("uncertainties")))
             checked = result.get("checked")
             if not isinstance(checked, int) or checked < len(assigned):
                 unchecked.append(f"{directory.name} reported checked={checked} of {len(assigned)}")
+        # Tasks apply in the order they were planned, so a targeted rerun starts
+        # its cues over from the translation instead of stacking on the full pass.
+        for cue_id in assigned:
+            by_id[cue_id] = dict(translated[cue_id])
         for row in tasks.rows(result, "cues"):
             cue_id = int(row["id"])
             if cue_id not in assigned:
@@ -409,11 +431,15 @@ def apply_proofread(job: Path) -> dict[str, Any]:
                 value = str(row.get(key) or "").strip()
                 if value and strip_punctuation(value) != target[field]:
                     target[field] = strip_punctuation(value)
-                    changed += 1
+    changed = sum(by_id[i][field] != translated[i][field]
+                  for i in by_id for field in ("source", "translation"))
     final = [by_id[int(c["id"])] for c in cues]
     _write(job, final, "cues", "final.json")
     existing = _read(job, "cues", "uncertainties.json") if (job / "cues" / "uncertainties.json").is_file() else []
-    _write(job, list(existing) + uncertainties, "cues", "uncertainties.json")
+    # Rebuilt rather than appended, so applying again does not repeat the notes.
+    kept = [u for u in existing if u.get("stage") != "proofread"]
+    _write(job, kept + [{**u, "stage": "proofread"} for u in uncertainties],
+           "cues", "uncertainties.json")
     return {"cues": len(final), "fields_changed": changed, "coverage_warnings": unchecked}
 
 

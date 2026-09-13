@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 _CJK = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+# Han and kana, the scripts written without spaces between words. Hangul is
+# left out because Korean separates words with spaces.
+_UNSPACED = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
+_UNIT = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]|[^\u3400-\u9fff\u3040-\u30ff]+")
+# Two characters is about the length of a Chinese or Japanese word.
+UNSPACED_CHARACTERS_PER_WORD = 2
 _NO_SPACE_BEFORE = set(",.!?;:%)]}，。！？；：、）】》」』")
 _NO_SPACE_AFTER = set("([{（【《「『")
 _CJK_PUNCTUATION = set("，。！？；：、）】》」』")
@@ -54,18 +60,62 @@ MAX_CUE_WIDTH = 84
 
 
 def _split_overlong(
-    start: int, end: int, limit: int
+    start: int, end: int, limit: float, weights: Sequence[float]
 ) -> list[tuple[int, int]]:
     """Halve a range until every piece fits, splitting as evenly as possible."""
-    if end - start + 1 <= limit:
+    total = sum(weights[start : end + 1])
+    if total <= limit or start == end:
         return [(start, end)]
-    middle = start + (end - start) // 2
-    return _split_overlong(start, middle, limit) + _split_overlong(middle + 1, end, limit)
+    middle, running = start, 0.0
+    for index in range(start, end):
+        running += weights[index]
+        middle = index
+        if running >= total / 2:
+            break
+    return (_split_overlong(start, middle, limit, weights)
+            + _split_overlong(middle + 1, end, limit, weights))
 
 
 def _match_token(value: str) -> str:
     """A word reduced to what both sides can agree on: letters and digits."""
     return re.sub(r"[^\w]", "", value, flags=re.UNICODE).casefold()
+
+
+def split_units(text: str) -> list[str]:
+    """Break text into the pieces two transcripts are compared on.
+
+    Spaced text breaks at whitespace. Han and kana break into single
+    characters, because a worker writes Chinese and Japanese without spaces
+    while a recogniser may return them a character or a word at a time, and a
+    character is the only unit both sides always share.
+    """
+    normalised = unicodedata.normalize("NFKC", text)
+    return [unit for token in normalised.split() for unit in _UNIT.findall(token)]
+
+
+def unit_weight(unit: str) -> float:
+    """A unit's share of a word: none for punctuation, half for a Han or kana character.
+
+    The long vowel mark weighs nothing, so respelling a word from hiragana
+    into katakana, which adds marks without adding sounds, does not lengthen it.
+    """
+    if not _match_token(unit) or unit == "ー":
+        return 0.0
+    return 1 / UNSPACED_CHARACTERS_PER_WORD if _UNSPACED.fullmatch(unit) else 1.0
+
+
+def lexical_weight(text: str) -> float:
+    """How many words text counts as against the cue cap and the batch size."""
+    return sum(unit_weight(unit) for unit in split_units(text))
+
+
+def join_units(units: Sequence[str]) -> str:
+    joined = ""
+    for unit in units:
+        if joined and not (_UNSPACED.match(joined[-1]) and _UNSPACED.match(unit[0])):
+            joined += " "
+        joined += unit
+    return joined
 
 
 def boundaries_from_lines(
@@ -80,17 +130,26 @@ def boundaries_from_lines(
     aligned against the words the recogniser heard, so a drop or an insertion
     shows up with a position rather than as a silent renumbering.
     """
-    spoken = [_match_token(str(w["text"])) for w in words]
+    spoken: list[str] = []
+    word_of_spoken: list[int] = []
+    for index, word in enumerate(words):
+        for unit in split_units(str(word["text"])):
+            normalised = _match_token(unit)
+            if normalised:
+                spoken.append(normalised)
+                word_of_spoken.append(index)
     written: list[str] = []
     owner_of_written: list[int] = []
     for index, line in enumerate(lines):
-        for token in line.split():
-            normalised = _match_token(token)
+        for unit in split_units(line):
+            normalised = _match_token(unit)
             if normalised:
                 written.append(normalised)
                 owner_of_written.append(index)
 
-    owner: list[int | None] = [None] * len(spoken)
+    # A word split across two units, such as a two character Chinese word,
+    # belongs to the line its first matched unit was written on.
+    owner: list[int | None] = [None] * len(words)
     matcher = difflib.SequenceMatcher(None, spoken, written, autojunk=False)
     matched = 0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -98,12 +157,14 @@ def boundaries_from_lines(
             continue
         matched += i2 - i1
         for offset in range(i2 - i1):
-            owner[i1 + offset] = owner_of_written[j1 + offset]
+            word = word_of_spoken[i1 + offset]
+            if owner[word] is None:
+                owner[word] = owner_of_written[j1 + offset]
 
     notes: list[str] = []
-    dropped = len(spoken) - matched
+    dropped = len(set(word_of_spoken)) - sum(1 for line in owner if line is not None)
     if dropped:
-        notes.append(f"{dropped} of {len(spoken)} words were not written back")
+        notes.append(f"{dropped} of {len(words)} words were not written back")
     added = len(written) - matched
     if added:
         notes.append(f"{added} word(s) in the answer are not in the transcript")
@@ -126,7 +187,11 @@ def boundaries_from_lines(
 
 
 def repair_boundaries(
-    boundaries: Sequence[Mapping[str, Any]], word_count: int, *, max_words: int = 17
+    boundaries: Sequence[Mapping[str, Any]],
+    word_count: int,
+    *,
+    max_words: int = 17,
+    weights: Sequence[float] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Force a set of proposed cue ranges to cover every word exactly once.
 
@@ -135,7 +200,10 @@ def repair_boundaries(
     wastes every other worker's answer. Gaps become their own cue and overlaps
     are trimmed, which keeps the invariant the timestamps depend on: each word
     belongs to exactly one cue, in order.
+
+    `weights` is each word's share of `max_words`, one each when not given.
     """
+    weights = list(weights) if weights is not None else [1.0] * word_count
     ordered = sorted(
         ({"start_word": int(b["start_word"]), "end_word": int(b["end_word"]),
           "text": str(b.get("text") or "")} for b in boundaries),
@@ -155,7 +223,7 @@ def repair_boundaries(
         if end < start:
             notes.append(f"dropped an empty range ending at word {end}")
             continue
-        pieces = _split_overlong(start, end, max_words)
+        pieces = _split_overlong(start, end, max_words, weights)
         if len(pieces) > 1:
             notes.append(
                 f"split a {end - start + 1} word cue at word {start} into {len(pieces)}"

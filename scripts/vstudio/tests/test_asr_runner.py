@@ -169,6 +169,7 @@ ACCEPTS = Capabilities(
 
 def _sixty_seconds(monkeypatch):
     monkeypatch.setattr(asr, "media_duration", lambda path: 60.0)
+    monkeypatch.setattr(asr, "_start_time", lambda path: 0.0)
 
 
 def test_an_accepted_codec_under_the_bitrate_is_copied(tmp_path, monkeypatch):
@@ -203,6 +204,28 @@ def test_an_unaccepted_codec_is_converted(tmp_path, monkeypatch):
     out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
     assert out.suffix == ".ogg" and "libopus" in calls[0]
     assert len(calls) == 1  # no pointless remux of a codec that cannot be copied
+
+
+def test_a_conversion_starts_the_audio_at_zero(tmp_path, monkeypatch):
+    """An Ogg Opus file whose first sample is not at zero is refused as
+    malformed, and ffmpeg leaves such an offset on some tracks it encodes."""
+    calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "dts")
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=1024))
+    asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert calls[0][calls[0].index("-af") + 1] == asr.REBASE_TO_ZERO
+
+
+def test_a_copied_ogg_that_does_not_start_at_zero_is_converted(tmp_path, monkeypatch):
+    calls = []
+    _sixty_seconds(monkeypatch)
+    monkeypatch.setattr(asr, "_track_codec", lambda media, track: "opus")
+    monkeypatch.setattr(asr, "_start_time", lambda path: 0.000167)
+    monkeypatch.setattr(asr, "run", _fake_ffmpeg(calls, size=100_000 * 60 // 8))
+    out = asr.extract_audio(tmp_path / "in.mkv", tmp_path / "audio.wav", capabilities=ACCEPTS)
+    assert out.suffix == ".ogg" and "copy" in calls[0] and "libopus" in calls[-1]
+
 
 
 def test_the_bitrate_is_measured_not_read_from_the_container(tmp_path, monkeypatch):

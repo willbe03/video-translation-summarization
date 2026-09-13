@@ -10,10 +10,18 @@ substitution pairs and leaves only the verdict to a reader.
 from __future__ import annotations
 
 import difflib
+import math
 import re
 from typing import Any, Mapping, Sequence
 
-from vstudio.cues import strip_punctuation
+from vstudio.cues import (
+    ass_timestamp,
+    join_units,
+    lexical_weight,
+    split_units,
+    strip_punctuation,
+    unit_weight,
+)
 
 # The segmentation prompt enforces this; exceeding it means a cue slipped past.
 MAX_ALIGNED_WORDS = 17
@@ -79,9 +87,32 @@ def _words(text: str) -> list[str]:
     `source_exact` keeps the commas and periods that `source` legitimately
     loses, so comparing raw tokens reported a substitution on almost every cue
     and buried the handful that matter.
+
+    Han and kana compare a character at a time, so a proofreader who swaps a
+    Japanese comma for a space has not added a word.
     """
     stripped = BANNED_PUNCTUATION.sub("", text)
-    return re.findall(r"[^\s]+", stripped)
+    return [unit for unit in split_units(stripped) if unit_weight(unit)]
+
+
+def _reading(unit: str) -> str:
+    """A unit with katakana folded to hiragana, so a respelling lines up with what it replaced."""
+    return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in unit)
+
+
+def _respellings(cue_id: int, exact: Sequence[str], shown: Sequence[str]) -> list[dict[str, Any]]:
+    """Runs of units that read the same but are written differently."""
+    out: list[dict[str, Any]] = []
+    start = None
+    for index in range(len(exact) + 1):
+        differs = index < len(exact) and exact[index] != shown[index]
+        if differs and start is None:
+            start = index
+        elif not differs and start is not None:
+            out.append({"id": cue_id, "was": join_units(exact[start:index]),
+                        "now": join_units(shown[start:index]), "added_words": 0})
+            start = None
+    return out
 
 
 def source_substitutions(cues: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -91,17 +122,32 @@ def source_substitutions(cues: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         exact, shown = _words(str(cue.get("source_exact", ""))), _words(str(cue.get("source", "")))
         if exact == shown:
             continue
-        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, exact, shown).get_opcodes():
+        readings = difflib.SequenceMatcher(
+            None, [_reading(u) for u in exact], [_reading(u) for u in shown]
+        )
+        for tag, i1, i2, j1, j2 in readings.get_opcodes():
             if tag == "equal":
+                out.extend(_respellings(int(cue["id"]), exact[i1:i2], shown[j1:j2]))
                 continue
-            was, now = " ".join(exact[i1:i2]), " ".join(shown[j1:j2])
+            added = sum(map(unit_weight, shown[j1:j2])) - sum(map(unit_weight, exact[i1:i2]))
             out.append({
                 "id": int(cue["id"]),
-                "was": was,
-                "now": now,
-                "added_words": max(0, (j2 - j1) - (i2 - i1)),
+                "was": join_units(exact[i1:i2]),
+                "now": join_units(shown[j1:j2]),
+                "added_words": max(0, math.floor(added)),
             })
     return out
+
+
+def _differs_from_asr(cue: Mapping[str, Any], words: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a cue is not timed exactly like the first and last word it covers."""
+    if cue.get("start_word") is None or cue.get("end_word") is None:
+        return False
+    first, last = int(cue["start_word"]), int(cue["end_word"])
+    if not 0 <= first <= last < len(words):
+        return True
+    return (abs(float(cue["start"]) - float(words[first]["start"])) > 1e-6
+            or abs(float(cue["end"]) - float(words[last]["end"])) > 1e-6)
 
 
 def longest_repaired_run(words: Sequence[Mapping[str, Any]]) -> int:
@@ -121,6 +167,7 @@ def verify_translation(
     *,
     ass_dialogue_count: int | None = None,
     ass_codec: str | None = None,
+    ass_times: Sequence[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
@@ -141,18 +188,33 @@ def verify_translation(
             failures.append(
                 f"the ass file has {ass_dialogue_count} dialogue lines but there are {len(final)} cues"
             )
+    if ass_times is not None and len(ass_times) == len(final):
+        mistimed = [
+            c["id"] for c, (start, end) in zip(final, ass_times)
+            if (start, end) != (ass_timestamp(float(c["start"])), ass_timestamp(float(c["end"])))
+        ]
+        if mistimed:
+            failures.append(
+                f"{len(mistimed)} ass dialogue line(s) are not timed like their cues: {mistimed[:5]}"
+            )
 
     bad_duration = [c["id"] for c in final if float(c["end"]) <= float(c["start"])]
     if bad_duration:
         failures.append(f"{len(bad_duration)} cue(s) have non-positive duration: {bad_duration[:5]}")
 
-    overlaps = [
-        final[i + 1]["id"]
-        for i in range(len(final) - 1)
+    # Where two people talk at once the transcript overlaps, and the cues keep
+    # that timing rather than invent one nobody heard.
+    details["overlapping_cues"] = sum(
+        1 for i in range(len(final) - 1)
         if float(final[i]["end"]) > float(final[i + 1]["start"]) + 1e-6
-    ]
-    if overlaps:
-        failures.append(f"{len(overlaps)} cue(s) overlap the previous one: {overlaps[:5]}")
+    )
+
+    if words:
+        off_asr = [c["id"] for c in final if _differs_from_asr(c, words)]
+        if off_asr:
+            failures.append(
+                f"{len(off_asr)} cue timestamp(s) differ from the ASR word times: {off_asr[:5]}"
+            )
 
     if draft:
         by_id = {int(c["id"]): c for c in draft}
@@ -176,7 +238,7 @@ def verify_translation(
     overlong = [
         c["id"] for c in final
         if c.get("end_word") is not None
-        and int(c["end_word"]) - int(c["start_word"]) + 1 > MAX_ALIGNED_WORDS
+        and lexical_weight(str(c.get("source_exact", ""))) > MAX_ALIGNED_WORDS
     ]
     if overlong:
         failures.append(f"{len(overlong)} cue(s) exceed {MAX_ALIGNED_WORDS} aligned words: {overlong[:5]}")

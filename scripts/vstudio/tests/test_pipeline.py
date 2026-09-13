@@ -3,9 +3,10 @@ import json
 import pytest
 
 from conftest import cue_lines, write_lines, write_result
+from conftest import words as timed_words
 from vstudio import jobs, pipeline, tasks
 from vstudio import prompts
-from vstudio.cues import repair_boundaries, strip_punctuation
+from vstudio.cues import build_cues, lexical_weight, repair_boundaries, strip_punctuation
 
 
 def _results(job, stage, values):
@@ -136,6 +137,14 @@ def test_translate_accepts_a_bare_list_and_records_uncertainties(transcribed):
     assert result["cues"] == 3 and result["uncertainties"] == 1
 
 
+@pytest.mark.parametrize("tag", ["</content>", "&lt;/content&gt;"])
+def test_a_stray_closing_tag_from_a_worker_is_not_a_cue_line(transcribed, tag):
+    job = _segmented(transcribed)
+    pipeline.plan_translate(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "translate", [["0\t一", "1\t二", "2\t三", tag]])
+    assert pipeline.apply_translate(job)["cues"] == 3
+
+
 def _translated(job):
     job = _segmented(job)
     pipeline.plan_translate(job, source_language="English", target_language="Chinese", size=100)
@@ -183,6 +192,49 @@ def test_proofread_can_target_a_subset(transcribed):
     assert plan["cues"] == 1
     payload = [json.loads(l) for l in (tasks.task_dirs(job, "proofread")[0] / "payload.jsonl").read_text().splitlines()]
     assert [row["id"] for row in payload if not row.get("context")] == [2]
+
+
+def test_a_targeted_proofread_keeps_the_full_pass_and_wins_for_its_own_cues(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "proofread", [{"checked": 3, "cues": [{"id": 0, "translation": "一号"},
+                                                         {"id": 2, "translation": "三号"}]}])
+    pipeline.apply_proofread(job)
+    plan = pipeline.plan_proofread(job, source_language="English", target_language="Chinese",
+                                   size=100, only=[2])
+    assert len(plan["dispatch"]) == 1 and len(tasks.task_dirs(job, "proofread")) == 2
+    write_result(tasks.task_dirs(job, "proofread")[-1], {"checked": 1, "cues": []})
+    assert tasks.dispatch_timing(job, "proofread")["tasks"] == 1
+    result = pipeline.apply_proofread(job)
+    final = json.loads((job / "cues" / "final.json").read_text())
+    assert [c["translation"] for c in final] == ["一号", "二", "三"]
+    assert result["fields_changed"] == 1
+
+
+def test_applying_proofread_again_does_not_repeat_its_uncertainties(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "proofread", [{"checked": 3, "cues": [],
+                                 "uncertainties": [{"id": 1, "question": "which one"}]}])
+    pipeline.apply_proofread(job)
+    pipeline.apply_proofread(job)
+    stored = json.loads((job / "cues" / "uncertainties.json").read_text())
+    assert [(u["id"], u["stage"]) for u in stored] == [(1, "proofread")]
+
+
+def test_a_targeted_proofread_replaces_the_uncertainties_of_its_cues(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "proofread", [{"checked": 3, "cues": [], "uncertainties": [
+        {"id": 1, "question": "old"}, {"id": 2, "question": "kept"}]}])
+    pipeline.apply_proofread(job)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese",
+                            size=100, only=[1])
+    write_result(tasks.task_dirs(job, "proofread")[-1],
+                 {"checked": 1, "cues": [], "uncertainties": [{"id": 1, "question": "new"}]})
+    pipeline.apply_proofread(job)
+    stored = json.loads((job / "cues" / "uncertainties.json").read_text())
+    assert sorted((u["id"], u["question"]) for u in stored) == [(1, "new"), (2, "kept")]
 
 
 def test_render_writes_one_dialogue_line_per_cue(transcribed):
@@ -233,6 +285,57 @@ def test_no_cue_survives_apply_segment_over_the_prompt_cap(transcribed):
     pipeline.apply_segment(transcribed)
     cues = json.loads((transcribed / "cues" / "cues.json").read_text())
     assert all(c["end_word"] - c["start_word"] + 1 <= prompts.MAX_WORDS_PER_CUE for c in cues)
+
+
+def _transcribed_as(job, texts, language):
+    payload = {"provider": "fake", "language": language, "context": "", "duration": len(texts) * 0.5,
+               "word_count": len(texts), "timings": {}, "windows": [], "words": timed_words(texts)}
+    (job / "asr").mkdir()
+    (job / "asr" / "words.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return job
+
+
+def test_unspaced_lines_keep_their_breaks_against_one_character_words(job):
+    """A recogniser can return Japanese a character at a time while the worker
+    writes it normally, so the two only agree character by character."""
+    _transcribed_as(job, list("今日はいい天気ですね。散歩に行きましょう。"), "Japanese")
+    pipeline.plan_segment(job, language="Japanese", size=100)
+    _results(job, "segment", [["今日はいい天気ですね", "散歩に行きましょう"]])
+    result = pipeline.apply_segment(job)
+    assert result["boundary_repairs"] == []
+    cues = json.loads((job / "cues" / "cues.json").read_text(encoding="utf-8"))
+    assert [c["source"] for c in cues] == ["今日はいい天気ですね", "散歩に行きましょう"]
+
+
+def test_unspaced_lines_align_against_multi_character_words(job):
+    _transcribed_as(job, ["今天", "天气", "很好。", "我们", "去", "散步", "吧。"], "Chinese")
+    pipeline.plan_segment(job, language="Chinese", size=100)
+    _results(job, "segment", [["今天天气很好", "我们去散步吧"]])
+    result = pipeline.apply_segment(job)
+    assert result["boundary_repairs"] == []
+    cues = json.loads((job / "cues" / "cues.json").read_text(encoding="utf-8"))
+    assert [(c["start_word"], c["end_word"]) for c in cues] == [(0, 2), (3, 6)]
+
+
+def test_an_unspaced_cue_counts_two_characters_as_one_word():
+    kept, notes = repair_boundaries([{"start_word": 0, "end_word": 33, "text": ""}], 34,
+                                    max_words=17, weights=[lexical_weight("天")] * 34)
+    assert notes == [] and len(kept) == 1
+    split, _ = repair_boundaries([{"start_word": 0, "end_word": 35, "text": ""}], 36,
+                                 max_words=17, weights=[lexical_weight("天")] * 36)
+    assert [(b["start_word"], b["end_word"]) for b in split] == [(0, 17), (18, 35)]
+
+
+def test_unspaced_batches_are_sized_in_words_not_characters():
+    characters = [{"text": "天"} for _ in range(40)]
+    assert pipeline.batch_words(characters, 10) == [(0, 19), (20, 39)]
+
+
+def test_cue_times_are_the_asr_word_times_even_where_speech_overlaps():
+    spoken = [{"text": "a", "start": 0.0, "end": 1.0}, {"text": "b", "start": 1.0, "end": 2.5},
+              {"text": "c", "start": 2.0, "end": 3.0}, {"text": "d", "start": 3.0, "end": 4.0}]
+    cues = build_cues(spoken, [{"start_word": 0, "end_word": 1}, {"start_word": 2, "end_word": 3}])
+    assert [(c["start"], c["end"]) for c in cues] == [(0.0, 2.5), (2.0, 4.0)]
 
 
 def test_a_worker_round_separates_thinking_from_orchestrator_delay(transcribed):

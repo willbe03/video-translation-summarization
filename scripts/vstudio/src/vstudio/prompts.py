@@ -17,7 +17,8 @@ from typing import Mapping, Sequence
 # at 42 columns without adding meaning; every other mark carries information.
 # Cues are capped by word count rather than by display width because a model
 # counts words reliably and estimates rendered columns badly. Seventeen words
-# is roughly two rendered lines at the shipped subtitle style.
+# is roughly two rendered lines at the shipped subtitle style. Chinese and
+# Japanese count two characters as one word.
 MAX_WORDS_PER_CUE = 17
 
 PUNCTUATION_RULE = (
@@ -49,6 +50,9 @@ def segment(*, language: str) -> str:
     return f"""Split the {language} transcript into fluent on-screen subtitle cues
 
 Each payload row is one word: index text start end
+In a language written without spaces such as Chinese or Japanese a row may be a
+single character Write that text back the way it is normally written without
+adding spaces and count two characters as one word
 
 Write the words back out in order with a line break where each cue ends
 Change nothing else Do not add omit reorder or alter a word

@@ -44,6 +44,26 @@ def test_an_added_word_is_reported_as_added():
     assert found[0]["added_words"] == 1 and found[0]["now"] == "good game"
 
 
+def test_a_japanese_comma_swapped_for_a_space_adds_no_word():
+    cues = [{"id": 0, "source_exact": "そうですね、行きましょう", "source": "そうですね 行きましょう"}]
+    assert source_substitutions(cues) == []
+
+
+def test_a_kanji_fix_to_an_unspaced_name_is_a_substitution_not_an_addition():
+    cues = [{"id": 0, "source_exact": "たなかさんです", "source": "田中さんです"}]
+    assert source_substitutions(cues) == [{"id": 0, "was": "たなか", "now": "田中", "added_words": 0}]
+
+
+def test_respelling_hiragana_as_katakana_with_long_vowel_marks_adds_no_word():
+    cues = [{"id": 0, "source_exact": "こんぴゅたをかう", "source": "コンピューターをかう"}]
+    assert [s["added_words"] for s in source_substitutions(cues)] == [0]
+
+
+def test_a_repeated_word_respelled_in_katakana_is_not_an_added_word():
+    cues = [{"id": 0, "source_exact": "ねこネコ", "source": "ネコネコ"}]
+    assert source_substitutions(cues) == [{"id": 0, "was": "ねこ", "now": "ネコ", "added_words": 0}]
+
+
 def _cue(cue_id, start, end, source, translation, **extra):
     return {"id": cue_id, "start": start, "end": end, "source": source,
             "source_exact": source, "translation": translation, **extra}
@@ -81,6 +101,39 @@ def test_a_long_interpolated_run_is_warned_about():
     report = verify_translation({}, final, final, words)
     assert any("interpolated timestamp run is 12" in w for w in report["warnings"])
     assert report["ok"]
+
+
+def test_an_unspaced_cue_is_measured_in_words_against_the_cap():
+    final = [_cue(0, 0.0, 5.0, "天" * 30, "天" * 30, start_word=0, end_word=29)]
+    report = verify_translation({}, final, final, None)
+    assert not any("aligned words" in f for f in report["failures"])
+
+
+def _timed_words(*spans):
+    return [{"text": "w", "start": start, "end": end} for start, end in spans]
+
+
+def test_cues_may_overlap_where_the_transcript_does():
+    words = _timed_words((0.0, 1.0), (1.0, 2.5), (2.0, 3.0), (3.0, 4.0))
+    final = [_cue(0, 0.0, 2.5, "a b", "甲乙", start_word=0, end_word=1),
+             _cue(1, 2.0, 4.0, "c d", "丙丁", start_word=2, end_word=3)]
+    report = verify_translation({}, final, final, words)
+    assert report["ok"] and report["details"]["overlapping_cues"] == 1
+
+
+def test_a_cue_not_timed_like_its_asr_words_fails():
+    words = _timed_words((0.0, 1.0), (1.0, 2.5), (2.0, 3.0), (3.0, 4.0))
+    final = [_cue(0, 0.0, 2.0, "a b", "甲乙", start_word=0, end_word=1),
+             _cue(1, 2.0, 4.0, "c d", "丙丁", start_word=2, end_word=3)]
+    report = verify_translation({}, final, final, words)
+    assert any("differ from the ASR word times: [0]" in f for f in report["failures"])
+
+
+def test_an_ass_line_not_timed_like_its_cue_fails():
+    final = [_cue(0, 0.0, 2.0, "a", "甲")]
+    report = verify_translation({}, final, final, None, ass_dialogue_count=1, ass_codec="ass",
+                                ass_times=[("0:00:00.00", "0:00:02.50")])
+    assert any("not timed like their cues" in f for f in report["failures"])
 
 
 def test_renaming_a_job_rewrites_the_paths_inside_it(tmp_path):

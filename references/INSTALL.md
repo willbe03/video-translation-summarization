@@ -48,7 +48,8 @@ uv run --project scripts/vstudio vstudio configure --concurrency 10
 ```
 
 Left unset, batches fall back to a size that suits a short video, which on a
-long one means many more tasks than some harnesses accept.
+long one means many more tasks than some harnesses accept. Claude Code runs at
+most 20 subagents at once, so use `--concurrency 20` there.
 
 This writes `~/.config/vstudio/config.env`. A real environment variable always
 beats the file, and `--job-root` on `vstudio new` beats both, so a single job

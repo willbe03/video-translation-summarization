@@ -97,7 +97,8 @@ def _convert(media: Path, target: Path, track: int, convert: tuple[str, str, int
     out = target.with_suffix(extension)
     try:
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
-             "-map", f"0:a:{track}", "-vn", "-c:a", codec, "-b:a", str(bitrate), str(out)])
+             "-map", f"0:a:{track}", "-vn", "-af", REBASE_TO_ZERO,
+             "-c:a", codec, "-b:a", str(bitrate), str(out)])
     except subprocess.CalledProcessError:
         out.unlink(missing_ok=True)
         return False
@@ -126,6 +127,8 @@ def _acceptable_copy(copied: Path, capabilities: Capabilities | None) -> bool:
         return True
     if capabilities.max_upload_bytes and copied.stat().st_size > capabilities.max_upload_bytes:
         return False
+    if copied.suffix == ".ogg" and _start_time(copied) != 0.0:
+        return False
     ceiling = capabilities.passthrough_max_bitrate
     if not ceiling:
         return True
@@ -142,6 +145,26 @@ def _track_codec(media: Path, track: int) -> str:
         text=True, capture_output=True, check=False,
     )
     return (result.stdout or "").strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+# An Ogg Opus file whose first sample is not at time zero is refused by MAI and
+# by libsndfile alike as "Supported file format but file is malformed", and
+# ffmpeg leaves such an offset on some tracks it encodes. Every conversion is
+# rebased to zero, padding or trimming the start so word times stay on the
+# video clock, and a copied Ogg file with an offset is converted instead.
+REBASE_TO_ZERO = "aresample=async=1:first_pts=0"
+
+
+def _start_time(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=start_time",
+         "-of", "default=nw=1:nk=1", str(path)],
+        text=True, capture_output=True, check=False,
+    )
+    try:
+        return float((result.stdout or "").strip().splitlines()[0])
+    except (IndexError, ValueError):
+        return 0.0
 
 
 def plan_windows(
