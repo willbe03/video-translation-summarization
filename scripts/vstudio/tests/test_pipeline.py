@@ -329,19 +329,32 @@ def test_cues_are_preferred_over_the_fallback(transcribed):
                                              "eight nine ten eleven twelve"]
 
 
-def test_batches_grow_before_the_orchestrator_is_asked_to_wait():
-    """Fewer larger tasks beat more waves: continuity improves and a harness
-    that caps concurrent children stops refusing the call."""
-    assert pipeline.batch_size(1415, 40, 150, None) == 40
-    assert pipeline.batch_size(1415, 40, 150, 10) == 142
-    # A short video is left at the target size rather than padded out.
-    assert pipeline.batch_size(94, 40, 150, 10) == 40
+def test_work_is_spread_across_every_worker_the_harness_will_run():
+    """Not a cap. More slots means more, smaller tasks, up to the point where a
+    worker would lose the context it needs."""
+    batch = pipeline.TRANSLATE_BATCH
+    assert -(-1415 // pipeline.batch_size(1415, batch, 10)) == 10
+    assert -(-1415 // pipeline.batch_size(1415, batch, 40)) == 40
 
 
-def test_a_batch_stops_growing_at_the_ceiling():
-    """Past the ceiling one worker writes enough that a truncation costs more
-    than the extra round would have."""
-    assert pipeline.batch_size(100_000, 400, 1200, 10) == 1200
+def test_slots_are_left_idle_rather_than_starving_a_worker_of_context():
+    """A short video across many slots would put a handful of cues in each,
+    and a translator with no surrounding speech loses the terminology."""
+    batch = pipeline.TRANSLATE_BATCH
+    assert pipeline.batch_size(94, batch, 40) == batch.floor
+    assert -(-94 // batch.floor) == 5  # five workers used out of forty
+
+
+def test_a_batch_stops_at_the_ceiling_and_spills_into_a_second_wave():
+    batch = pipeline.SEGMENT_BATCH
+    assert pipeline.batch_size(100_000, batch, 10) == batch.ceiling
+    assert pipeline._wave_plan(-(-100_000 // batch.ceiling), 10)["waves"] > 1
+
+
+def test_the_preferred_size_is_used_when_the_harness_capacity_is_unknown():
+    for batch in (pipeline.SEGMENT_BATCH, pipeline.TRANSLATE_BATCH, pipeline.PROOFREAD_BATCH):
+        assert pipeline.batch_size(5000, batch, None) == batch.preferred
+        assert batch.floor <= batch.preferred <= batch.ceiling
 
 
 def test_waves_are_reported_only_when_one_round_will_not_do():
@@ -352,13 +365,13 @@ def test_waves_are_reported_only_when_one_round_will_not_do():
     assert "groups of 10" in many["note"]
 
 
-def test_the_cap_comes_from_the_environment_when_not_passed(transcribed, monkeypatch):
-    monkeypatch.setenv(pipeline.MAX_TASKS_ENV, "2")
-    plan = pipeline.plan_segment(transcribed, language="English", size=2)
-    assert plan["tasks_planned"] <= 2 and plan["waves"] == 1
+def test_concurrency_comes_from_the_environment_when_not_passed(transcribed, monkeypatch):
+    monkeypatch.setenv(pipeline.CONCURRENCY_ENV, "4")
+    plan = pipeline.plan_segment(transcribed, language="English")
+    assert plan["waves"] == 1 and plan["words_per_task"] == pipeline.SEGMENT_BATCH.floor
 
 
-def test_a_malformed_cap_is_ignored_rather_than_failing_a_job(transcribed, monkeypatch):
-    monkeypatch.setenv(pipeline.MAX_TASKS_ENV, "lots")
-    plan = pipeline.plan_segment(transcribed, language="English", size=100)
-    assert plan["waves"] == 1
+def test_a_malformed_concurrency_falls_back_rather_than_failing_a_job(transcribed, monkeypatch):
+    monkeypatch.setenv(pipeline.CONCURRENCY_ENV, "lots")
+    plan = pipeline.plan_segment(transcribed, language="English")
+    assert plan["words_per_task"] == pipeline.SEGMENT_BATCH.preferred

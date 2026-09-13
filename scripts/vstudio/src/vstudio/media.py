@@ -620,6 +620,95 @@ def probe_media(path: Path) -> dict[str, Any]:
     }
 
 
+# A track marked with any of these is not the programme audio: it is narration
+# for the visually impaired, a director's commentary, or a karaoke mix. Picking
+# one transcribes the wrong thing and nothing downstream would notice.
+_UNUSABLE_DISPOSITIONS = ("comment", "visual_impaired", "descriptions", "karaoke")
+
+
+def audio_streams(path: Path) -> list[dict[str, Any]]:
+    """Every audio track in the file, with what is known about each."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_streams",
+         "-of", "json", str(path)],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe cannot read the audio tracks of {path}")
+    streams = []
+    for order, stream in enumerate(json.loads(result.stdout or "{}").get("streams") or []):
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        streams.append({
+            "track": order,                       # index among audio streams, for -map 0:a:N
+            "stream_index": int(stream.get("index", order)),
+            "codec": stream.get("codec_name") or "",
+            "channels": int(stream.get("channels") or 0),
+            "language": str(tags.get("language") or "").lower(),
+            "title": str(tags.get("title") or ""),
+            "default": bool(disposition.get("default")),
+            "flags": sorted(k for k, v in disposition.items() if v and k in _UNUSABLE_DISPOSITIONS),
+        })
+    return streams
+
+
+# Containers tag a track with ISO 639-2 while a locale like ja-JP carries
+# ISO 639-1, and the two do not share a prefix: "jpn" does not start with "ja".
+# Matching on one or the other silently picked the wrong track.
+_LANGUAGE_ALIASES = {
+    "en": {"en", "eng"}, "zh": {"zh", "zho", "chi", "cmn", "yue"},
+    "ja": {"ja", "jpn"}, "ko": {"ko", "kor"}, "fr": {"fr", "fra", "fre"},
+    "de": {"de", "deu", "ger"}, "es": {"es", "spa"}, "it": {"it", "ita"},
+    "ru": {"ru", "rus"}, "pt": {"pt", "por"}, "nl": {"nl", "nld", "dut"},
+    "ar": {"ar", "ara"}, "hi": {"hi", "hin"}, "tr": {"tr", "tur"},
+    "pl": {"pl", "pol"}, "sv": {"sv", "swe"}, "id": {"id", "ind"},
+    "vi": {"vi", "vie"}, "th": {"th", "tha"}, "uk": {"uk", "ukr"},
+}
+
+
+def language_forms(value: str) -> set[str]:
+    """Every code that names the same language as `value`, or just it."""
+    code = str(value or "").replace("_", "-").split("-")[0].strip().lower()
+    if not code:
+        return set()
+    for forms in _LANGUAGE_ALIASES.values():
+        if code in forms:
+            return forms
+    return {code}
+
+
+def choose_audio_stream(
+    streams: Sequence[Mapping[str, Any]], *, language: str | None = None
+) -> dict[str, Any]:
+    """Pick the track to transcribe and say why.
+
+    A file with one track needs no thought. With several the order is: drop the
+    tracks that are not the programme, prefer one whose language was asked for,
+    then the one the container marks default, then the first. The reason is
+    reported so an orchestrator can question the choice when a file carries two
+    plausible languages.
+    """
+    if not streams:
+        raise RuntimeError("the file has no audio stream, so there is nothing to transcribe")
+    if len(streams) == 1:
+        return {**streams[0], "reason": "the only audio track"}
+
+    usable = [s for s in streams if not s["flags"]] or list(streams)
+    wanted = language_forms(language or "")
+    if wanted:
+        name = sorted(wanted)[0]
+        matching = [s for s in usable if s["language"] in wanted]
+        if matching:
+            best = min(matching, key=lambda s: (not s["default"], s["track"]))
+            return {**best, "reason": f"the only {name} track" if len(matching) == 1
+                    else f"the default {name} track"}
+    marked = [s for s in usable if s["default"]]
+    if len(marked) == 1:
+        return {**marked[0], "reason": "the track the file marks as default"}
+    best = min(usable, key=lambda s: (not s["default"], s["track"]))
+    return {**best, "reason": "the first usable track, with nothing to prefer another by"}
+
+
 def title_from_filename(path: Path) -> str:
     """A readable title from a filename, for job naming and ASR hotwords."""
     stem = re.sub(r"[._]+", " ", path.stem)

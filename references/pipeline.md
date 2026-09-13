@@ -56,6 +56,16 @@ It prints the job directory. Keep it in a variable; every later command takes
 it. A URL is downloaded into the job; a local file is used where it sits and is
 never copied or deleted.
 
+It also picks which audio track to transcribe. One track needs no thought. When
+a file carries several, the output lists them all with `audio_track_reason`
+saying why that one was chosen: a track in the language you asked for beats the
+one the container marks default, and commentary, audio description and karaoke
+tracks are never chosen. Read that list. A film with an original and a dub, or
+a recording with a separate interpreter channel, is where the automatic choice
+can be right by its own rules and wrong for what the user asked for. Pass
+`--language` to `new` when you know the spoken language, and override after the
+fact with `asr --audio-track N`.
+
 ```bash
 $VS asr "$JOB"
 ```
@@ -66,6 +76,12 @@ detected language, and its own internal timings.
 
 If the source language matters and the user told you, pass a locale:
 `--language en-US`. Otherwise let it detect.
+
+What goes to the endpoint is the chosen track, copied rather than re-encoded
+whenever the endpoint takes its codec, which covers the Opus and AAC that web
+video almost always uses. That halves the upload and spares the speech a decode
+and re-encode before the recogniser sees it. Anything else becomes 16 kHz mono
+WAV. The output reports `uploaded_format` and `uploaded_bytes`.
 
 ## Subtitles: segment, translate, proofread, render, verify
 
@@ -192,20 +208,26 @@ the rate measured on a real recording, ninety minutes is roughly fourteen
 thousand words and fourteen hundred cues, which at the default batch sizes
 would be thirty six segmentation tasks and thirty six translation tasks.
 
-That is more than some harnesses will run at once, so `--max-tasks` exists and
-is set at install. With it set to ten, that same video plans twelve
-segmentation tasks in two waves and ten translation tasks in one, because the
-batches grow rather than the queue. Read `waves` in the plan output and follow
-it; do not try to work it out from the task count.
+That is more than some harnesses will run at once, so `--concurrency` is set at
+install and every plan spreads its work across exactly that many workers. With
+ten, that video plans ten translation tasks of 142 cues rather than thirty six
+of forty. With forty it plans forty of thirty six, because the point is to use
+what is there rather than to hold a number down. A batch stops growing at a
+ceiling, past which one worker writes too much in a single answer, and stops
+shrinking at a floor, past which it has lost the speech around what it is
+working on. When the ceiling still leaves more tasks than slots, the plan
+reports `waves`. Follow it rather than working it out from the task count.
 
 ## Options worth knowing
 
 - `--size` on any plan command changes how many rows a worker gets. Smaller
   means more workers and more parallelism but less context for continuity.
-- `--max-tasks` is how many workers this harness runs at once. A plan grows its
-  batches to fit inside that number before it asks you to work in waves,
-  because fewer larger tasks also read better across cue boundaries. It is set
-  once at install, so you rarely pass it.
+- `--concurrency` is how many workers this harness runs at once. It is not a
+  cap: the work is spread evenly across that many, so more slots means more and
+  smaller tasks, down to the size below which a worker loses the surrounding
+  speech it needs. Set once at install, so you rarely pass it.
+- `--audio-track N` on `asr` transcribes a different track than the one chosen
+  at acquire time.
 - `--split-seconds` on `asr` cuts the audio for a provider that would otherwise
   take the whole file. It is faster on long media and slightly worse at the
   seams, so use it when the user cares more about wall clock than the last

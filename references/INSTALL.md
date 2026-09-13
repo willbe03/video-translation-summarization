@@ -37,18 +37,18 @@ suggest a directory they already keep large working files in.
 uv run --project scripts/vstudio vstudio configure --artifacts ~/<their choice>
 ```
 
-Record how many workers this harness runs at once in the same command. Hermes
-refuses a delegation carrying more tasks than
-`delegation.max_concurrent_children`, ten by default, so `--max-tasks 10` is
-right there. Claude Code and Codex document no such limit, and leaving it unset
-means the planner never holds the task count down.
+Record how many workers this harness runs at once in the same command. Every
+plan spreads its work across that many, so the number is what the skill uses,
+not a limit it stays under. Hermes refuses a delegation carrying more tasks than
+`delegation.max_concurrent_children`, ten by default. Claude Code and Codex
+document no such limit, so pick what the machine and the account can carry.
 
 ```bash
-uv run --project scripts/vstudio vstudio configure --max-tasks 10
+uv run --project scripts/vstudio vstudio configure --concurrency 10
 ```
 
-Without it a ninety minute video plans thirty six translation tasks at once.
-With it, ten larger ones, which also read better across cue boundaries.
+Left unset, batches fall back to a size that suits a short video, which on a
+long one means many more tasks than some harnesses accept.
 
 This writes `~/.config/vstudio/config.env`. A real environment variable always
 beats the file, and `--job-root` on `vstudio new` beats both, so a single job

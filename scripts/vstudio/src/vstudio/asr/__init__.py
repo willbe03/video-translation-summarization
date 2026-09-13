@@ -9,6 +9,7 @@ only has to turn one piece of audio into words.
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -54,14 +55,56 @@ def load_backend(name: str) -> Backend:
     return factory()
 
 
-def extract_audio(media: Path, target: Path) -> Path:
-    """One mono 16 kHz WAV, which is what every backend here wants."""
+def extract_audio(
+    media: Path,
+    target: Path,
+    *,
+    track: int = 0,
+    capabilities: Capabilities | None = None,
+) -> Path:
+    """The chosen audio track, ready to hand to the backend.
+
+    When the backend takes the track's own codec the stream is copied, which
+    uploads a fraction of the bytes and avoids decoding and re-encoding speech
+    the recogniser is about to analyse. Otherwise it is converted to 16 kHz
+    mono WAV, which every backend here accepts.
+
+    The track is named explicitly rather than left to ffmpeg's default, which
+    on a file carrying a dub or a commentary is not necessarily the programme.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
+    accepted = dict(capabilities.accepts_codecs) if capabilities else {}
+    if accepted:
+        codec = _track_codec(media, track)
+        suffix = accepted.get(codec)
+        if suffix:
+            copied = target.with_suffix(suffix)
+            try:
+                run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
+                     "-map", f"0:a:{track}", "-vn", "-c:a", "copy", str(copied)])
+            except subprocess.CalledProcessError:
+                copied.unlink(missing_ok=True)  # not every codec remuxes cleanly
+            else:
+                cap = capabilities.max_upload_bytes if capabilities else None
+                if not cap or copied.stat().st_size <= cap:
+                    return copied
+                # A lossless multichannel track is larger than the downmix.
+                copied.unlink(missing_ok=True)
     run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(media),
-        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(target),
+        "-map", f"0:a:{track}", "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", str(target),
     ])
     return target
+
+
+def _track_codec(media: Path, track: int) -> str:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", f"a:{track}",
+         "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(media)],
+        text=True, capture_output=True, check=False,
+    )
+    return (result.stdout or "").strip().splitlines()[0] if result.stdout.strip() else ""
 
 
 def plan_windows(
@@ -72,9 +115,14 @@ def plan_windows(
     split_seconds: int | None = None,
 ) -> list[Window]:
     """Cut the audio when the backend needs it or the caller asked for it."""
+    duration = media_duration(audio)
     seconds = capabilities.segment_seconds if capabilities.needs_segmentation else split_seconds
+    if not seconds and capabilities.max_whole_file_seconds and duration > capabilities.max_whole_file_seconds:
+        # The backend would rather take the whole file, but this one is past
+        # what it accepts, and a refused request loses more than a seam does.
+        seconds = int(capabilities.max_whole_file_seconds)
     if not seconds:
-        return [Window(0, audio, 0.0, media_duration(audio))]
+        return [Window(0, audio, 0.0, duration)]
     pieces = extract_chunks(audio, work_dir, chunk_seconds=seconds)
     windows: list[Window] = []
     cursor = 0.0
@@ -122,6 +170,7 @@ def transcribe(
     language: str | None = None,
     concurrency: int = 4,
     split_seconds: int | None = None,
+    track: int = 0,
 ) -> dict[str, Any]:
     """Transcribe one media file and write words.json and transcript.md."""
     backend = load_backend(provider)
@@ -131,7 +180,8 @@ def transcribe(
 
     timings: dict[str, float] = {}
     started = time.monotonic()
-    audio = extract_audio(media, work_dir / "audio.wav")
+    audio = extract_audio(media, work_dir / "audio.wav", track=track,
+                          capabilities=backend.capabilities)
     timings["extract_audio"] = round(time.monotonic() - started, 3)
 
     started = time.monotonic()
@@ -174,6 +224,9 @@ def transcribe(
 
     payload = {
         "provider": provider,
+        "audio_track": track,
+        "uploaded_format": audio.suffix.lstrip("."),
+        "uploaded_bytes": audio.stat().st_size,
         "language": detected,
         "context": context,
         "duration": round(sum(w.duration for w in windows), 3),

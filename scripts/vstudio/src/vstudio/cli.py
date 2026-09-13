@@ -56,8 +56,8 @@ def cmd_configure(args: argparse.Namespace) -> int:
         values[jobs.ARTIFACTS_ENV] = str(root)
     if args.provider:
         values[jobs.PROVIDER_ENV] = args.provider
-    if args.max_tasks:
-        values[pipeline.MAX_TASKS_ENV] = str(args.max_tasks)
+    if args.concurrency:
+        values[pipeline.CONCURRENCY_ENV] = str(args.concurrency)
     path = jobs.write_config(values)
     emit({"config": str(path), "settings": jobs.load_config()})
     return 0
@@ -144,7 +144,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     jobs.write_manifest(job, {"job": str(job), "source": args.source, "stage": "acquiring"})
     with jobs.timed(job, "acquire", source_kind=described["kind"]):
         facts = acquire(args.source, job, cookies=Path(args.cookies) if args.cookies else None,
-                        max_height=args.max_height)
+                        max_height=args.max_height, language=args.language)
     manifest = jobs.read_manifest(job)
     manifest.update(facts)
     manifest["stage"] = "acquired"
@@ -153,10 +153,22 @@ def cmd_new(args: argparse.Namespace) -> int:
     jobs.write_manifest(job, manifest)
     job = jobs.rename_job(job, manifest["title"])
     manifest = jobs.read_manifest(job)
-    emit({"job": str(job), "title": manifest["title"], "duration": manifest.get("duration"),
-          "media": manifest["media"], "source_kind": manifest["source_kind"],
-          "has_video": manifest.get("has_video"),
-          "page_description": bool((manifest.get("page") or {}).get("description"))})
+    report = {"job": str(job), "title": manifest["title"], "duration": manifest.get("duration"),
+              "media": manifest["media"], "source_kind": manifest["source_kind"],
+              "has_video": manifest.get("has_video"),
+              "audio_track": manifest.get("audio_track"),
+              "audio_track_reason": manifest.get("audio_track_reason"),
+              "page_description": bool((manifest.get("page") or {}).get("description"))}
+    if manifest.get("audio_track_ambiguous"):
+        # More than one track means a choice was made. Show what was on offer so
+        # the orchestrator can override before an hour of ASR runs on a dub.
+        report["audio_tracks"] = [
+            {k: v for k, v in stream.items() if k in
+             ("track", "language", "title", "channels", "default", "flags")}
+            for stream in manifest.get("audio_tracks") or []
+        ]
+        report["override_with"] = f"vstudio asr {job} --audio-track N"
+    emit(report)
     return 0
 
 
@@ -164,6 +176,7 @@ def cmd_asr(args: argparse.Namespace) -> int:
     job = args.job
     manifest = jobs.read_manifest(job)
     provider = args.provider or os.environ.get("VSTUDIO_ASR_PROVIDER") or "mai"
+    track = args.audio_track if args.audio_track is not None else int(manifest.get("audio_track") or 0)
     context = args.context if args.context is not None else str(manifest.get("asr_context") or "")
     with jobs.timed(job, "asr", provider=provider) as extra:
         payload = asr.transcribe(
@@ -175,17 +188,20 @@ def cmd_asr(args: argparse.Namespace) -> int:
             language=args.language,
             concurrency=args.concurrency,
             split_seconds=args.split_seconds,
+            track=track,
         )
         extra["words"] = payload["word_count"]
     jobs.update_manifest(
         job,
         stage="transcribed",
         asr_provider=provider,
+        audio_track=track,
         source_language=payload["language"] or manifest.get("source_language") or "",
         word_count=payload["word_count"],
     )
     emit({"job": str(job), "provider": provider, "words": payload["word_count"],
-          "language": payload["language"], "windows": len(payload["windows"]),
+          "language": payload["language"], "audio_track": track,
+          "windows": len(payload["windows"]),
           "timings": payload["timings"], "transcript": str(job / "asr" / "transcript.md")})
     return 0
 
@@ -199,7 +215,7 @@ def cmd_plan_segment(args: argparse.Namespace) -> int:
     manifest = jobs.read_manifest(args.job)
     language = args.language or manifest.get("source_language") or "English"
     emit(pipeline.plan_segment(args.job, language=language, size=args.size,
-                               max_tasks=args.max_tasks))
+                               concurrency=args.concurrency))
     return 0
 
 
@@ -226,7 +242,7 @@ def cmd_plan_translate(args: argparse.Namespace) -> int:
         instructions=manifest.get("style") or "",
         page_text="" if args.no_page_text else _page_text(manifest),
         size=args.size,
-        max_tasks=args.max_tasks,
+        concurrency=args.concurrency,
     ))
     return 0
 
@@ -248,7 +264,7 @@ def cmd_plan_proofread(args: argparse.Namespace) -> int:
         page_text="" if args.no_page_text else _page_text(manifest),
         size=args.size,
         only=args.only,
-        max_tasks=args.max_tasks,
+        concurrency=args.concurrency,
     ))
     return 0
 
@@ -321,7 +337,7 @@ def cmd_plan_summarize(args: argparse.Namespace) -> int:
         language=args.language or manifest.get("source_language") or "English",
         instructions=args.style or "",
         seconds=args.seconds,
-        max_tasks=args.max_tasks,
+        concurrency=args.concurrency,
     ))
     return 0
 
@@ -428,11 +444,12 @@ def build_parser() -> argparse.ArgumentParser:
     def plan_command(name: str, handler, help_text: str) -> argparse.ArgumentParser:
         p = job_command(name, handler, help_text)
         p.add_argument(
-            "--max-tasks", type=int,
-            help=f"most workers this harness runs at once; defaults to "
-                 f"${pipeline.MAX_TASKS_ENV}. Batches grow to fit before waves are "
-                 f"suggested.",
+            "--concurrency", type=int,
+            help=f"how many workers this harness runs at once; defaults to "
+                 f"${pipeline.CONCURRENCY_ENV}. The work is spread evenly across "
+                 f"that many, within the batch sizes each stage can work well at.",
         )
+        p.add_argument("--size", type=int, help="rows per worker, overriding the spread")
         return p
 
     p = sub.add_parser("doctor", help="report what is installed and which ASR providers are ready")
@@ -443,8 +460,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("configure", help="record the artifacts directory and default ASR provider")
     p.add_argument("--artifacts", help="directory jobs are created in")
     p.add_argument("--provider", choices=asr.backend_names(), help="default ASR provider")
-    p.add_argument("--max-tasks", type=int,
-                   help="most workers this harness runs at once, for example 10 on Hermes")
+    p.add_argument("--concurrency", type=int,
+                   help="how many workers this harness runs at once, for example 10 on Hermes")
     p.set_defaults(handler=cmd_configure)
 
     p = sub.add_parser("install-agents", help="write the worker definitions for a harness")
@@ -464,6 +481,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title")
     p.add_argument("--cookies")
     p.add_argument("--max-height", type=int, default=720)
+    p.add_argument("--language", help="expected spoken language, which picks the audio "
+                                      "track on a file that carries several")
     p.set_defaults(handler=cmd_new)
 
     p = job_command("asr", cmd_asr, "transcribe the job's media")
@@ -471,25 +490,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--language", help="BCP-47 locale such as en-US; omit to auto-detect")
     p.add_argument("--context", help="ASR hotwords; omit to use the ones mined at acquire time")
     p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--audio-track", type=int,
+                   help="which audio track to transcribe, overriding the one chosen at acquire")
     p.add_argument("--split-seconds", type=int,
                    help="cut the audio even when the provider does not need it; "
                         "faster on long media, slightly worse at the seams")
 
     p = plan_command("plan-segment", cmd_plan_segment, "write cue-splitting tasks")
     p.add_argument("--language")
-    p.add_argument("--size", type=int, default=pipeline.WORDS_PER_SEGMENT_TASK)
     job_command("apply-segment", cmd_apply_segment, "build cues from the segment results")
 
     p = plan_command("plan-translate", cmd_plan_translate, "write translation tasks")
     p.add_argument("--target-language", required=True)
     p.add_argument("--source-language")
     p.add_argument("--style", help="tone, localization and terminology instructions")
-    p.add_argument("--size", type=int, default=pipeline.CUES_PER_TRANSLATE_TASK)
     p.add_argument("--no-page-text", action="store_true")
     job_command("apply-translate", cmd_apply_translate, "merge the translation results")
 
     p = plan_command("plan-proofread", cmd_plan_proofread, "write proofreading tasks")
-    p.add_argument("--size", type=int, default=pipeline.CUES_PER_PROOFREAD_TASK)
     p.add_argument("--only", type=int, nargs="*", help="cue ids to revisit instead of all")
     p.add_argument("--no-page-text", action="store_true")
     job_command("apply-proofread", cmd_apply_proofread, "merge the proofreading results")

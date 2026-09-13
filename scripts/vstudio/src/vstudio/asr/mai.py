@@ -93,12 +93,40 @@ class _MaiError(RuntimeError):
     pass
 
 
+# Audio is uploaded as 16 kHz mono PCM, 32 KB per second of speech, so an hour
+# is roughly 110 MB going up before any transcribing starts. A fixed timeout
+# was fine for a five minute clip and failed a long one on a slow link.
+BASE_TIMEOUT_SECONDS = 120
+# 1 MB per second is a pessimistic 8 Mbit upload, which is what makes this a
+# ceiling on waiting rather than an estimate of how long it will take.
+SECONDS_PER_MEGABYTE = 1.0
+MAX_TIMEOUT_SECONDS = 3600
+
+
+# The endpoint reads the declared type, so a copied Opus track announced as
+# audio/wav is rejected rather than transcribed.
+_CONTENT_TYPES = {
+    ".wav": "audio/wav", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+    ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".flac": "audio/flac",
+}
+
+
+def content_type(audio: Path) -> str:
+    return _CONTENT_TYPES.get(audio.suffix.lower(), "application/octet-stream")
+
+
+def request_timeout(size_bytes: int) -> int:
+    """How long to wait for one request, scaled by what has to be uploaded."""
+    megabytes = size_bytes / (1024 * 1024)
+    return int(min(MAX_TIMEOUT_SECONDS, BASE_TIMEOUT_SECONDS + megabytes * SECONDS_PER_MEGABYTE))
+
+
 def transcribe_audio(
     audio: Path,
     *,
     phrases: Sequence[str] = (),
     locale: str | None = None,
-    timeout_s: int = 300,
+    timeout_s: int | None = None,
     max_retries: int = 3,
 ) -> dict[str, Any]:
     """Transcribe a single audio file and return the full MAI JSON response.
@@ -109,6 +137,8 @@ def transcribe_audio(
     import time
 
     endpoint = mai_endpoint()
+    if timeout_s is None:
+        timeout_s = request_timeout(audio.stat().st_size)
     key = mai_api_key()
     boundary = "--hermes-mai-boundary-" + os.urandom(8).hex()
     definition = json.dumps(_definition(phrases=phrases, locale=locale), ensure_ascii=False)
@@ -121,8 +151,10 @@ def transcribe_audio(
     body += definition.encode("utf-8")
     body += b"\r\n"
     body += f"--{boundary}\r\n".encode("utf-8")
-    body += b'Content-Disposition: form-data; name="audio"; filename="audio.wav"\r\n'
-    body += b"Content-Type: audio/wav\r\n\r\n"
+    body += (
+        f'Content-Disposition: form-data; name="audio"; filename="audio{audio.suffix}"\r\n'
+    ).encode("utf-8")
+    body += f"Content-Type: {content_type(audio)}\r\n\r\n".encode("utf-8")
     body += audio_bytes
     body += f"\r\n--{boundary}--\r\n".encode("utf-8")
 
@@ -256,6 +288,20 @@ class MaiBackend:
         returns_word_times=True,
         requirements="MAI_SPEECH_KEY and MAI_SPEECH_REGION in the environment",
         prefers_whole_file=True,
+        # Azure documents a hard 500 MB and five hour limit and recommends
+        # staying under 300 MB and two hours for consistent speed. At 32 KB per
+        # second that size guidance binds at about two and a half hours, so two
+        # hours is the point where cutting beats risking the whole request.
+        max_whole_file_seconds=7200,
+        # Documented as accepted by the endpoint. Web video is almost always
+        # Opus or AAC already, so the usual case uploads a tenth of the bytes
+        # and skips a decode and re-encode of the speech entirely.
+        accepts_codecs=(
+            ("opus", ".ogg"), ("aac", ".m4a"), ("mp3", ".mp3"), ("flac", ".flac"),
+        ),
+        # The endpoint refuses anything over 500 MB; stopping well short leaves
+        # room for the multipart envelope and a slow link.
+        max_upload_bytes=300 * 1024 * 1024,
     )
 
     def preflight(self) -> None:

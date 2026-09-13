@@ -64,6 +64,18 @@ class Capabilities:
     # True when cutting the audio costs accuracy at the seams, so the runner
     # only splits a whole-file backend when asked explicitly.
     prefers_whole_file: bool = True
+    # Longest single request the backend will take. Above this the runner cuts
+    # even though the backend would rather it did not, because a refused or
+    # timed-out request loses the whole job and a seam loses a word.
+    max_whole_file_seconds: float | None = None
+    # Codecs the backend takes as they are, mapped to the container extension
+    # to copy them into. A track already in one of these is handed over without
+    # being decoded and re-encoded, which is both smaller and one generation
+    # of loss fewer. Empty means everything is converted to 16 kHz mono WAV.
+    accepts_codecs: tuple[tuple[str, str], ...] = ()
+    # Above this, copying is the wrong call even when the codec is accepted:
+    # a lossless multichannel track is far larger than the mono downmix.
+    max_upload_bytes: int | None = None
     extras: tuple[str, ...] = field(default_factory=tuple)
 
 

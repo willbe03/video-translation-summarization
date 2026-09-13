@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from vstudio.media import (
+    audio_streams,
+    choose_audio_stream,
     download_video,
     fetch_source_metadata,
     infer_context,
@@ -33,7 +35,25 @@ def describe_source(source: str) -> dict[str, Any]:
     )
 
 
-def acquire(source: str, job: Path, *, cookies: Path | None = None, max_height: int = 720) -> dict[str, Any]:
+def _audio_choice(media: Path, language: str | None) -> dict[str, Any]:
+    streams = audio_streams(media)
+    chosen = choose_audio_stream(streams, language=language)
+    return {
+        "audio_track": chosen["track"],
+        "audio_track_reason": chosen["reason"],
+        "audio_tracks": streams,
+        "audio_track_ambiguous": len(streams) > 1,
+    }
+
+
+def acquire(
+    source: str,
+    job: Path,
+    *,
+    cookies: Path | None = None,
+    max_height: int = 720,
+    language: str | None = None,
+) -> dict[str, Any]:
     described = describe_source(source)
     if described["kind"] == "local":
         media = Path(described["path"])
@@ -53,6 +73,7 @@ def acquire(source: str, job: Path, *, cookies: Path | None = None, max_height: 
             "height": probe["height"],
             "page": {},
             "asr_context": infer_context(title),
+            **_audio_choice(media, language),
         }
 
     media, metadata, choice = download_video(source, job / "media", cookies=cookies, max_height=max_height)
@@ -74,4 +95,5 @@ def acquire(source: str, job: Path, *, cookies: Path | None = None, max_height: 
         "height": probe["height"],
         "page": page,
         "asr_context": infer_context(title, str(page.get("description") or "")),
+        **_audio_choice(media, language),
     }

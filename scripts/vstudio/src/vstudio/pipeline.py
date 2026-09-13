@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -25,57 +26,66 @@ from vstudio.cues import (
     validate_boundaries,
 )
 
-# A worker reads its whole payload before answering, so a batch has to fit
-# comfortably in one context while still being large enough that continuity of
-# terminology and pronouns is visible inside it.
-WORDS_PER_SEGMENT_TASK = 400
-CUES_PER_TRANSLATE_TASK = 40
-CUES_PER_PROOFREAD_TASK = 60
-
-# The most a batch may grow to when the task count is being held down. Past
-# these a worker is writing enough lines in one answer that a truncation costs
-# more than the extra round would have. Roughly three times the target.
-MAX_WORDS_PER_SEGMENT_TASK = 1200
-MAX_CUES_PER_TRANSLATE_TASK = 150
-MAX_CUES_PER_PROOFREAD_TASK = 200
-
-MAX_TASKS_ENV = "VSTUDIO_MAX_TASKS"
+# Every stage has a range its batch may sit in. Below the floor a worker has
+# lost the surrounding speech it needs to judge a break or keep a term
+# consistent. Above the ceiling it is writing enough in one answer that a
+# truncation costs more than another round would have. The preferred size is
+# what to use when nothing is known about how many workers can run at once.
+@dataclass(frozen=True)
+class Batching:
+    floor: int
+    preferred: int
+    ceiling: int
 
 
-def batch_size(total: int, target: int, ceiling: int, max_tasks: int | None) -> int:
-    """Grow the batch just enough to keep the task count inside `max_tasks`.
+# A floor of 150 words is about a minute of speech, enough to see whole
+# sentences either side of a break. Twenty cues is roughly the same span, which
+# is what carries a pronoun chain and a repeated term through a translation.
+SEGMENT_BATCH = Batching(floor=150, preferred=400, ceiling=1200)
+TRANSLATE_BATCH = Batching(floor=20, preferred=40, ceiling=150)
+PROOFREAD_BATCH = Batching(floor=20, preferred=60, ceiling=200)
 
-    Fewer, larger tasks are better for continuity as well as for a harness that
-    caps concurrent children, so the batch grows before the orchestrator is
-    asked to dispatch in waves. It stops at `ceiling`, past which one worker is
-    writing too much in a single answer.
+CONCURRENCY_ENV = "VSTUDIO_CONCURRENCY"
+
+
+def batch_size(total: int, batching: Batching, concurrency: int | None) -> int:
+    """Spread the work across every worker the harness will run at once.
+
+    This is not a cap. Given how many workers can run together, the batch is
+    whatever divides the work evenly among them, so a short video uses fewer,
+    larger batches and a long one uses more. The two bounds are quality
+    limits rather than scheduling ones: an even split that would fall below the
+    floor is widened, which leaves slots idle on purpose because a worker
+    without context segments worse, and one that would pass the ceiling is
+    narrowed, which spills into a second wave.
     """
-    if not max_tasks or max_tasks < 1 or total <= target * max_tasks:
-        return target
-    return min(ceiling, -(-total // max_tasks))
+    if not concurrency or concurrency < 1:
+        return batching.preferred
+    even = -(-total // concurrency)
+    return max(batching.floor, min(batching.ceiling, even))
 
 
-def _max_tasks(explicit: int | None) -> int | None:
+def _concurrency(explicit: int | None) -> int | None:
     if explicit is not None:
         return explicit
-    configured = os.environ.get(MAX_TASKS_ENV)
+    configured = os.environ.get(CONCURRENCY_ENV)
     try:
         return int(configured) if configured else None
     except ValueError:
         return None
 
 
-def _wave_plan(count: int, max_tasks: int | None) -> dict[str, Any]:
+def _wave_plan(count: int, concurrency: int | None) -> dict[str, Any]:
     """Tell the orchestrator whether one round of dispatch will do."""
-    if not max_tasks or count <= max_tasks:
+    if not concurrency or count <= concurrency:
         return {"tasks_planned": count, "waves": 1}
     return {
         "tasks_planned": count,
-        "waves": -(-count // max_tasks),
-        "dispatch_at_once": max_tasks,
+        "waves": -(-count // concurrency),
+        "dispatch_at_once": concurrency,
         "note": (
-            f"this harness runs {max_tasks} workers at a time, so dispatch the brief "
-            f"list in groups of {max_tasks} and wait for each group before starting the "
+            f"this harness runs {concurrency} workers at a time, so dispatch the brief "
+            f"list in groups of {concurrency} and wait for each group before starting the "
             f"next. Run apply once, after the last group."
         ),
     }
@@ -134,14 +144,14 @@ def plan_segment(
     job: Path,
     *,
     language: str,
-    size: int = WORDS_PER_SEGMENT_TASK,
-    max_tasks: int | None = None,
+    size: int | None = None,
+    concurrency: int | None = None,
 ) -> dict[str, Any]:
     asr = _read(job, "asr", "words.json")
     words = asr["words"]
     tasks.reset_stage(job, "segment")
-    limit = _max_tasks(max_tasks)
-    size = batch_size(len(words), size, MAX_WORDS_PER_SEGMENT_TASK, limit)
+    limit = _concurrency(concurrency)
+    size = size or batch_size(len(words), SEGMENT_BATCH, limit)
     ranges = batch_words(words, size)
     instructions = prompts.segment(language=language)
     directories = []
@@ -213,13 +223,13 @@ def plan_translate(
     target_language: str,
     instructions: str = "",
     page_text: str = "",
-    size: int = CUES_PER_TRANSLATE_TASK,
-    max_tasks: int | None = None,
+    size: int | None = None,
+    concurrency: int | None = None,
 ) -> dict[str, Any]:
     cues = _read(job, "cues", "cues.json")
     tasks.reset_stage(job, "translate")
-    limit = _max_tasks(max_tasks)
-    size = batch_size(len(cues), size, MAX_CUES_PER_TRANSLATE_TASK, limit)
+    limit = _concurrency(concurrency)
+    size = size or batch_size(len(cues), TRANSLATE_BATCH, limit)
     body = prompts.translate(
         source_language=source_language,
         target_language=target_language,
@@ -324,9 +334,9 @@ def plan_proofread(
     target_language: str,
     instructions: str = "",
     page_text: str = "",
-    size: int = CUES_PER_PROOFREAD_TASK,
+    size: int | None = None,
     only: Sequence[int] | None = None,
-    max_tasks: int | None = None,
+    concurrency: int | None = None,
 ) -> dict[str, Any]:
     cues = _read(job, "cues", "translated.json")
     by_id = {int(c["id"]): c for c in cues}
@@ -334,8 +344,8 @@ def plan_proofread(
     if not selected:
         raise RuntimeError("no cues selected for proofreading")
     tasks.reset_stage(job, "proofread")
-    limit = _max_tasks(max_tasks)
-    size = batch_size(len(selected), size, MAX_CUES_PER_PROOFREAD_TASK, limit)
+    limit = _concurrency(concurrency)
+    size = size or batch_size(len(selected), PROOFREAD_BATCH, limit)
     body = prompts.proofread(
         source_language=source_language,
         target_language=target_language,
@@ -437,7 +447,7 @@ def plan_summarize(
     language: str,
     instructions: str = "",
     seconds: int = SUMMARY_SECONDS_PER_TASK,
-    max_tasks: int | None = None,
+    concurrency: int | None = None,
 ) -> dict[str, Any]:
     asr = _read(job, "asr", "words.json")
     segments = _transcript_segments(job, asr)
@@ -463,7 +473,7 @@ def plan_summarize(
         for index, part in enumerate(parts)
     ]
     return tasks.plan(job, "summarize", directories, parts=len(parts),
-                      **_wave_plan(len(parts), _max_tasks(max_tasks)))
+                      **_wave_plan(len(parts), _concurrency(concurrency)))
 
 
 # Without cues, the transcript is cut into fixed stretches so a summary worker

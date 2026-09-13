@@ -28,12 +28,12 @@ wait for a whole stage.
 install so the planner sizes its batches to fit:
 
 ```bash
-uv run --project scripts/vstudio vstudio configure --max-tasks 10
+uv run --project scripts/vstudio vstudio configure --concurrency 10
 ```
 
 After that a plan either fits in one call or tells you how many to send per
-group. A ninety minute video plans ten translation tasks rather than thirty
-six, because the batches grow instead of the queue.
+group. A ninety minute video plans ten translation tasks of 142 cues rather
+than thirty six of forty, which also reads better across cue boundaries.
 
 ## What this harness enforces
 
