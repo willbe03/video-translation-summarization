@@ -1,0 +1,329 @@
+import json
+
+import pytest
+
+from conftest import cue_lines, write_lines, write_result
+from vstudio import jobs, pipeline, tasks
+from vstudio import prompts
+from vstudio.cues import repair_boundaries, strip_punctuation
+
+
+def _results(job, stage, values):
+    for directory, value in zip(tasks.task_dirs(job, stage), values):
+        if isinstance(value, list):
+            write_lines(directory, value)
+        else:
+            write_result(directory, value)
+
+
+def _segment_lines(job, per_line=4):
+    """Answer every segment task by writing its words back with breaks."""
+    for directory in tasks.task_dirs(job, "segment"):
+        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
+        write_lines(directory, cue_lines([r["text"] for r in rows], per_line))
+
+
+def test_word_batches_prefer_a_sentence_end(transcribed):
+    words = json.loads((transcribed / "asr" / "words.json").read_text())["words"]
+    ranges = pipeline.batch_words(words, 4)
+    assert ranges[0] == (0, 2)  # "three." ends the first sentence
+    assert ranges[0][0] == 0 and ranges[-1][1] == len(words) - 1
+    for earlier, later in zip(ranges, ranges[1:]):
+        assert later[0] == earlier[1] + 1
+
+
+def test_word_batches_cover_everything_when_there_is_no_punctuation(tmp_path):
+    words = [{"text": f"w{i}"} for i in range(37)]
+    ranges = pipeline.batch_words(words, 10)
+    covered = [i for start, end in ranges for i in range(start, end + 1)]
+    assert covered == list(range(37))
+
+
+def test_segment_round_trip_builds_cues(transcribed):
+    plan = pipeline.plan_segment(transcribed, language="English", size=100)
+    assert plan["agent"] == "vstudio-worker-light"
+    assert len(plan["dispatch"]) == 1
+    _results(transcribed, "segment", [[
+        "one two three.", "four five six seven.", "eight nine ten eleven twelve.",
+    ]])
+    result = pipeline.apply_segment(transcribed)
+    assert result["cues"] == 3
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert cues[0]["start"] == 0.0
+    assert cues[-1]["source_exact"].startswith("eight")
+    assert result["boundary_repairs"] == []
+
+
+def test_a_dropped_word_joins_the_cue_before_it_and_is_reported(transcribed):
+    """Line breaks cannot produce a gap or an overlap, only a missing word."""
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [[
+        "one two three.", "four six seven.", "eight nine ten eleven twelve.",
+    ]])
+    result = pipeline.apply_segment(transcribed)
+    assert any("1 of 12 words were not written back" in n for n in result["boundary_repairs"])
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert [(c["start_word"], c["end_word"]) for c in cues] == [(0, 2), (3, 6), (7, 11)]
+
+
+def test_an_invented_word_is_reported_and_changes_no_cue(transcribed):
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [[
+        "one two three.", "four five six seven INVENTED.", "eight nine ten eleven twelve.",
+    ]])
+    result = pipeline.apply_segment(transcribed)
+    assert any("not in the transcript" in n for n in result["boundary_repairs"])
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert [(c["start_word"], c["end_word"]) for c in cues] == [(0, 2), (3, 6), (7, 11)]
+    assert "INVENTED" not in cues[1]["source"]
+
+
+def test_punctuation_and_case_do_not_stop_a_word_matching(transcribed):
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [["One, two, THREE!", "four five six seven", "eight nine ten eleven twelve"]])
+    result = pipeline.apply_segment(transcribed)
+    assert result["boundary_repairs"] == []
+    assert result["cues"] == 3
+
+
+def test_a_worker_that_wrote_nothing_is_named_for_re_dispatch(transcribed):
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    (tasks.task_dirs(transcribed, "segment")[0] / "result.txt").write_text("  \n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="000"):
+        pipeline.apply_segment(transcribed)
+
+
+def test_a_segmenter_cannot_move_a_timestamp(transcribed):
+    """A cue break is a line break, so there is nowhere to put a timestamp."""
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [["one two three four five six seven eight nine ten eleven twelve"]])
+    pipeline.apply_segment(transcribed)
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert cues[0]["start"] == 0.0 and cues[-1]["end"] == 6.0
+
+
+def test_the_cue_text_always_comes_from_the_recogniser(transcribed):
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [["one two three", "four five six seven",
+                                       "eight nine ten eleven twelve"]])
+    pipeline.apply_segment(transcribed)
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    for cue in cues:
+        assert cue["source"] == strip_punctuation(cue["source_exact"])
+
+
+def _segmented(job):
+    pipeline.plan_segment(job, language="English", size=100)
+    _results(job, "segment", [["one two three.", "four five six seven.",
+                               "eight nine ten eleven twelve."]])
+    pipeline.apply_segment(job)
+    return job
+
+
+def test_translate_names_the_ids_that_came_back_empty(transcribed):
+    job = _segmented(transcribed)
+    pipeline.plan_translate(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "translate", [["0\t一二三"]])
+    with pytest.raises(RuntimeError, match=r"\[1, 2\]"):
+        pipeline.apply_translate(job)
+
+
+def test_translate_accepts_a_bare_list_and_records_uncertainties(transcribed):
+    job = _segmented(transcribed)
+    pipeline.plan_translate(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "translate", [["0\t一", "1\t二", "2\t三", "? 1 what is on screen here"]])
+    result = pipeline.apply_translate(job)
+    assert result["cues"] == 3 and result["uncertainties"] == 1
+
+
+def _translated(job):
+    job = _segmented(job)
+    pipeline.plan_translate(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "translate", [["0\t一", "1\t二", "2\t三"]])
+    pipeline.apply_translate(job)
+    return job
+
+
+def test_proofread_context_rows_are_marked_and_never_returnable(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=1)
+    first = tasks.task_dirs(job, "proofread")[0]
+    payload = [json.loads(l) for l in (first / "payload.jsonl").read_text().splitlines()]
+    assert payload[0]["id"] == 0 and "context" not in payload[0]
+    assert any(row.get("context") for row in payload[1:])
+    write_result(first, {"checked": 1, "cues": [{"id": 2, "translation": "hijacked"}]})
+    for directory in tasks.task_dirs(job, "proofread")[1:]:
+        write_result(directory, {"checked": 1, "cues": []})
+    with pytest.raises(RuntimeError, match="context only"):
+        pipeline.apply_proofread(job)
+
+
+def test_proofread_warns_when_a_worker_underreports_coverage(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "proofread", [{"checked": 1, "cues": []}])
+    result = pipeline.apply_proofread(job)
+    assert result["coverage_warnings"]
+
+
+def test_proofread_applies_only_the_cues_it_returned(transcribed):
+    job = _translated(transcribed)
+    pipeline.plan_proofread(job, source_language="English", target_language="Chinese", size=100)
+    _results(job, "proofread", [{"checked": 3, "cues": [{"id": 1, "translation": "二号"}]}])
+    result = pipeline.apply_proofread(job)
+    final = json.loads((job / "cues" / "final.json").read_text())
+    assert result["fields_changed"] == 1
+    assert [c["translation"] for c in final] == ["一", "二号", "三"]
+
+
+def test_proofread_can_target_a_subset(transcribed):
+    job = _translated(transcribed)
+    plan = pipeline.plan_proofread(job, source_language="English", target_language="Chinese",
+                                   size=100, only=[2])
+    assert plan["cues"] == 1
+    payload = [json.loads(l) for l in (tasks.task_dirs(job, "proofread")[0] / "payload.jsonl").read_text().splitlines()]
+    assert [row["id"] for row in payload if not row.get("context")] == [2]
+
+
+def test_render_writes_one_dialogue_line_per_cue(transcribed):
+    job = _translated(transcribed)
+    output = pipeline.render(job)
+    lines = [l for l in output.read_text(encoding="utf-8-sig").splitlines() if l.startswith("Dialogue:")]
+    assert len(lines) == 3
+    assert "一" in lines[0]
+
+
+def test_summarize_falls_back_to_asr_windows_before_cues_exist(transcribed):
+    plan = pipeline.plan_summarize(transcribed, language="English")
+    assert plan["parts"] == 1
+    payload = [json.loads(l) for l in (tasks.task_dirs(transcribed, "summarize")[0] / "payload.jsonl").read_text().splitlines()]
+    assert payload[0]["text"].startswith("one two three")
+
+
+def test_synthesize_writes_the_summary(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    _results(transcribed, "summarize", [{"notes": "They count to twelve (00:00)"}])
+    pipeline.apply_summarize(transcribed)
+    pipeline.plan_synthesize(transcribed, language="English")
+    _results(transcribed, "synthesize", [{"summary": "# Counting\n\nThey count to twelve (00:00)"}])
+    output = pipeline.apply_synthesize(transcribed)
+    assert "count to twelve" in output.read_text()
+
+def test_an_overlong_cue_is_split_evenly():
+    repaired, notes = repair_boundaries(
+        [{"start_word": 0, "end_word": 11, "text": "one two three"}], 12, max_words=5
+    )
+    assert any("split a 12 word cue" in note for note in notes)
+    assert [(b["start_word"], b["end_word"]) for b in repaired] == [(0, 2), (3, 5), (6, 8), (9, 11)]
+    # A piece cannot keep display text that covers words it no longer holds.
+    assert all(b["text"] == "" for b in repaired)
+
+
+def test_a_cue_at_the_cap_is_left_alone():
+    repaired, notes = repair_boundaries(
+        [{"start_word": 0, "end_word": 4, "text": "kept"}], 5, max_words=5
+    )
+    assert notes == [] and repaired[0]["text"] == "kept"
+
+
+def test_no_cue_survives_apply_segment_over_the_prompt_cap(transcribed):
+    """The verifier fails a cue over the cap, so segmentation must not emit one."""
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [["one two three four five six seven eight nine ten eleven twelve"]])
+    pipeline.apply_segment(transcribed)
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert all(c["end_word"] - c["start_word"] + 1 <= prompts.MAX_WORDS_PER_CUE for c in cues)
+
+
+def test_a_worker_round_separates_thinking_from_orchestrator_delay(transcribed):
+    """Nothing in Python runs while workers think, so the gap between the two
+    commands is the round. The result files say when the work itself ended,
+    which is what tells a slow worker from a slow orchestrator."""
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    _results(transcribed, "segment", [["one two three four five six"]])
+    stamp = tasks.stage_root(transcribed, "segment") / "planned_at"
+    # Ten seconds before the result landed, thirty before now.
+    stamp.write_text(str(float(stamp.read_text()) - 30), encoding="utf-8")
+    timing = tasks.dispatch_timing(transcribed, "segment")
+    assert 30 <= timing["seconds"] < 40
+    assert 29 <= timing["last_done"] <= timing["seconds"]
+
+
+def test_a_stage_that_was_never_planned_reports_no_dispatch_time(job):
+    assert tasks.dispatch_timing(job, "translate") is None
+
+
+def test_a_stage_with_no_results_yet_still_reports_the_gap(transcribed):
+    pipeline.plan_segment(transcribed, language="English", size=100)
+    timing = tasks.dispatch_timing(transcribed, "segment")
+    assert "seconds" in timing and "last_done" not in timing
+
+
+def test_parallel_segment_tasks_cannot_collide(transcribed):
+    """Workers run at the same time, so the only thing keeping them apart is
+    that their inputs and outputs are disjoint by construction."""
+    plan = pipeline.plan_segment(transcribed, language="English", size=4)
+    directories = tasks.task_dirs(transcribed, "segment")
+    assert len(directories) == len(plan["dispatch"]) > 1
+
+    ranges, seen = [], set()
+    for directory in directories:
+        meta = json.loads((directory / "meta.json").read_text())
+        ranges.append((meta["first_word"], meta["last_word"]))
+        # Each worker sees its slice renumbered from zero, so it cannot name a
+        # word outside it even by accident.
+        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
+        assert [r["index"] for r in rows] == list(range(len(rows)))
+        seen.add(directory)
+    ranges.sort()
+    assert ranges[0][0] == 0
+    for earlier, later in zip(ranges, ranges[1:]):
+        assert later[0] == earlier[1] + 1, "task word ranges overlap or leave a gap"
+
+    # One result file each, none shared, and the merge checks the whole run.
+    _segment_lines(transcribed, per_line=99)
+    result = pipeline.apply_segment(transcribed)
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    assert result["cues"] == len(ranges)
+    assert [c["start_word"] for c in cues] == [start for start, _ in ranges]
+
+
+def test_a_worker_writing_another_slices_words_cannot_reach_them(transcribed):
+    """The worst a bad answer can do is spoil its own slice. Words it writes
+    that are not in its own payload are reported and changed nothing."""
+    pipeline.plan_segment(transcribed, language="English", size=4)
+    directories = tasks.task_dirs(transcribed, "segment")
+    for index, directory in enumerate(directories):
+        rows = [json.loads(l) for l in (directory / "payload.jsonl").read_text().splitlines()]
+        texts = [r["text"] for r in rows]
+        if index == 1:
+            texts = texts + ["eleven", "twelve"]  # words belonging to the last task
+        write_lines(directory, [" ".join(texts)])
+    result = pipeline.apply_segment(transcribed)
+    cues = json.loads((transcribed / "cues" / "cues.json").read_text())
+    metas = [json.loads((d / "meta.json").read_text()) for d in directories]
+    assert [(c["start_word"], c["end_word"]) for c in cues] == [
+        (m["first_word"], m["last_word"]) for m in metas
+    ]
+    assert any("not in the transcript" in n for n in result["boundary_repairs"])
+
+
+def test_the_summary_fallback_does_not_collapse_on_a_whole_file_provider(transcribed):
+    """A provider that takes the whole file reports one window. Splitting on
+    windows made the entire transcript a single row with nothing to cite."""
+    payload = json.loads((transcribed / "asr" / "words.json").read_text())
+    payload["windows"] = [{"index": 0, "start": 0.0, "duration": 3600.0, "words": 12, "seconds": 1.0}]
+    for index, word in enumerate(payload["words"]):
+        word["start"], word["end"] = index * 40.0, index * 40.0 + 1.0
+    (transcribed / "asr" / "words.json").write_text(json.dumps(payload), encoding="utf-8")
+    segments = pipeline._transcript_segments(transcribed, payload)
+    assert len(segments) == len(payload["words"])
+    assert segments[0]["start"] == 0.0 and segments[1]["start"] == 40.0
+
+
+def test_cues_are_preferred_over_the_fallback(transcribed):
+    _segmented(transcribed)
+    payload = json.loads((transcribed / "asr" / "words.json").read_text())
+    segments = pipeline._transcript_segments(transcribed, payload)
+    assert [s["text"] for s in segments] == ["one two three", "four five six seven",
+                                             "eight nine ten eleven twelve"]

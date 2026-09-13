@@ -1,0 +1,32 @@
+[project]
+name = "vstudio"
+version = "0.1.0"
+description = "Deterministic helpers for the video-subtitles-and-summaries skill"
+requires-python = ">=3.11"
+dependencies = [
+    "you-get>=0.4.1743",
+    "yt-dlp>=2026.7.4",
+]
+
+# Local ASR pulls torch and a 5.5 GB model cache, so it is opt-in. Install with
+# `uv sync --extra local-asr` only when the user chose the local backend.
+[project.optional-dependencies]
+local-asr = [
+    "accelerate>=1.10",
+    "librosa>=0.11",
+    "nagisa>=0.3.0",
+    "soundfile>=0.13",
+    "soynlp>=0.0.493",
+    "torch>=2.8",
+    "transformers>=5.13.0",
+]
+
+[project.scripts]
+vstudio = "vstudio.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4"]
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"

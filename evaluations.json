@@ -1,0 +1,50 @@
+[
+  {
+    "skills": ["video-subtitles-and-summaries"],
+    "query": "Translate this talk into Chinese subtitles: https://www.youtube.com/watch?v=R25FaF5QqXE",
+    "expected_behavior": [
+      "Launches one orchestrator subagent instead of running any pipeline step in the main session",
+      "Does not transcribe, translate or summarize anything in the main session",
+      "Reports the path of the .ass file and the per-step timing table the orchestrator returns"
+    ]
+  },
+  {
+    "skills": ["video-subtitles-and-summaries"],
+    "query": "Summarize ~/Movies/standup-2026-03-11.mkv for me",
+    "expected_behavior": [
+      "Treats the argument as a local file and never attempts a download",
+      "Launches the orchestrator rather than running vstudio commands directly",
+      "Leaves the user's own file in place and does not copy or delete it",
+      "Reports the summary path and says whether check-summary passed"
+    ]
+  },
+  {
+    "skills": ["video-subtitles-and-summaries"],
+    "query": "Subtitle this in Spanish, keep the gaming slang instead of translating it literally: https://www.bilibili.com/video/BV1xx411c7mD",
+    "expected_behavior": [
+      "Passes the slang instruction through to --style rather than inventing a flag for it",
+      "Launches one worker per brief path in a single batch so the stage runs in parallel",
+      "Never puts cue text or transcript text into a worker's launch message"
+    ]
+  },
+  {
+    "skills": ["video-subtitles-and-summaries"],
+    "query": "Set this skill up for me, I'd rather nothing left my laptop",
+    "expected_behavior": [
+      "Follows references/INSTALL.md",
+      "Recognises that the privacy preference selects the qwen-local provider",
+      "Installs the local-asr extra rather than assuming it is already present",
+      "Asks where job artifacts should be written instead of picking a directory",
+      "Runs vstudio doctor at the end and reports what is ready"
+    ]
+  },
+  {
+    "skills": ["video-subtitles-and-summaries"],
+    "query": "The proofreader changed 'GG' to 'good game' in a few cues, fix those",
+    "expected_behavior": [
+      "Uses vstudio plan-proofread --only with the affected cue ids",
+      "Does not rerun the whole proofread stage or regenerate the translation",
+      "Re-runs verify afterwards and reports whether the drift is gone"
+    ]
+  }
+]
