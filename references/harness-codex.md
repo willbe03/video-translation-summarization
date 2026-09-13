@@ -29,7 +29,7 @@ that workers ran with the instructions alone.
 Not the exec ban. There is no documented way to take a tool away from a Codex
 agent, so a worker keeps its shell and the instructions are the only thing
 stopping it reading the payload with `cat` and writing the result through a
-heredoc. The heredoc is the one that bites: subtitle text is full of quotes and
+heredoc. The heredoc is the one that bites: cue text is full of quotes and
 the failure is silent.
 
 `sandbox_mode` bounds where a worker may write, not what it may run. The

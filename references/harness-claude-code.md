@@ -5,9 +5,8 @@ You are in the right file if you have an `Agent` tool.
 ## Launching
 
 One `Agent` call per task, all of them in a single message so they run
-concurrently. This is worth being strict about: on a measured run, launching
-three translation workers across three messages instead of one added fifty
-seconds to a ninety second stage.
+concurrently. Launched across several messages, the stage waits on each message
+in turn.
 
 ```
 Agent(

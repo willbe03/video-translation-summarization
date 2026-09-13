@@ -1,6 +1,6 @@
 ---
 name: video-subtitles-and-summaries
-description: Subtitles, translates and summarizes local or online video.
+description: Transcribes, translates and summarizes local or online video into bilingual ASS subtitles or a cited summary. Use when the user asks to subtitle, translate, transcribe or summarize a video file or a YouTube or Bilibili link.
 version: 1.0.0
 author: willbe, Hermes Agent
 license: MIT
@@ -24,9 +24,8 @@ Do not run this job in the current session. Launch one orchestrator subagent
 and let it drive. This session's only work is to collect the parameters, launch
 that subagent, and report what comes back.
 
-The job is long, it fans out to many workers, and every artifact it produces is
-a file. Keeping it out of the main session is what makes the transcript of a
-90 minute video cost you nothing.
+The job is long and fans out to many workers, and every artifact it produces is
+a file, so none of it needs to pass through this session.
 
 ## Before the first job
 
@@ -100,19 +99,3 @@ every translation, proofreading, segmentation and summary brief to a worker.
   installing the worker definitions.
 
 An orchestrator reads the shared file and its own harness file, never all four.
-
-## What the parts do
-
-`scripts/vstudio` is a Python package that does everything with one right
-answer: downloading, ffmpeg, calling the ASR endpoint, slicing work into task
-directories, checking what came back, and rendering the ASS file. It never
-calls a model.
-
-Agents do everything with judgement: where a cue should break, how a line
-should read in the target language, what an ASR mishearing was meant to be,
-what a stretch of video is about.
-
-Each worker is handed the path of a brief. The brief holds the instructions,
-the payload file beside it holds the data, and the worker writes its answer to
-a third file. Cue text never passes through the orchestrator's context, and a
-worker never sees this skill, the job, or any other worker's task.

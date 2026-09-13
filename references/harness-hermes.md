@@ -44,7 +44,7 @@ the only thing in the way. Paste them in full, every time.
 
 Observed behaviour when a worker keeps its shell: it reads the payload with
 `cat`, writes the result through a heredoc, and drafts to a temporary file
-outside the job. The heredoc is the dangerous one, since subtitle text is full
+outside the job. The heredoc is the dangerous one, since cue text is full
 of quotes and the failure is silent.
 
 What Hermes does give you for free is context isolation. Children start with no

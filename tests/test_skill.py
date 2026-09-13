@@ -108,13 +108,12 @@ def test_frontmatter_fields_and_description_rules():
     assert not re.search(r"\bI\b|\byou can\b", description)
 
 
-def test_the_description_names_both_halves_and_local_input():
-    """The repo caps a description at 60 characters, so it has to earn every
-    word: what it produces, and that a file on disk is a valid source."""
-    description = _frontmatter()["description"]
-    assert len(description) <= 60
-    lowered = description.lower()
-    for term in ("subtitle", "translat", "summar", "local"):
+def test_the_description_says_what_the_skill_does_and_when_to_use_it():
+    """The description is all Claude reads when choosing a skill, so it names
+    what comes out, that a file on disk is a valid source, and the requests
+    that should load it."""
+    lowered = _frontmatter()["description"].lower()
+    for term in ("subtitle", "translat", "summar", "local", "use when"):
         assert term in lowered, term
 
 

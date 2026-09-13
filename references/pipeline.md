@@ -9,23 +9,22 @@
 - Summary: notes, synthesis, coverage
 - Finishing
 - When a stage fails
+- Long videos
 - Options worth knowing
 
 ## How to run a command
 
-Every command below is run from the skill directory:
+Run every command from the skill directory:
 
 ```bash
 uv run --project scripts/vstudio vstudio <command> ...
 ```
 
-Every command below is written as `$VS <command>`, which stands for
-`uv run --project scripts/vstudio vstudio <command>` run from the skill
-directory. Write it out in full in each command rather than storing it in a
-variable: a shell variable does not survive from one tool call to the next, and
-zsh, the default shell on macOS, does not split `$VS` into words, so `$VS
-"$JOB"` fails there. Every command prints JSON on stdout. Read that JSON; do not
-go looking in the job directory for the same answer.
+Below, `$VS <command>` is shorthand for that line and `$JOB` for the job
+directory. Write both out in full each time rather than storing them in
+variables: a shell variable does not survive from one tool call to the next,
+and zsh does not split `$VS` into words. Every command prints JSON on stdout.
+Read that JSON; do not go looking in the job directory for the same answer.
 
 Copy the checklist for your branch and tick items off as you go. A long job is
 easy to lose your place in, and the step most often skipped is the last one.
@@ -77,8 +76,8 @@ in code.
 $VS new "<source>" --title "<title if the user gave one>"
 ```
 
-It prints the job directory. Keep it in a variable; every later command takes
-it. A URL is downloaded into the job; a local file is used where it sits and is
+It prints the job directory, which every later command takes as `$JOB`. A URL
+is downloaded into the job; a local file is used where it sits and is
 never copied or deleted.
 
 It also picks which audio track to transcribe. One track needs no thought. When
@@ -108,11 +107,9 @@ If the source language matters and the user told you, pass a locale:
 `--language en-US`. Otherwise let it detect.
 
 What goes to the endpoint is the chosen track. A track already in a codec the
-endpoint takes, and under 192 kbps, is copied rather than re-encoded: half the
-bytes and one generation of loss fewer. Anything richer or in another codec is
-converted once to 192 kbps Opus. The output reports `uploaded_format` and
-`uploaded_bytes`, and a six minute video uploads five to eight megabytes rather
-than the eleven that uncompressed audio would cost.
+endpoint takes, and under 192 kbps, is copied rather than re-encoded. Anything
+richer or in another codec is converted once to 192 kbps Opus. The output
+reports `uploaded_format` and `uploaded_bytes`.
 
 ## Subtitles: segment, translate, proofread, render, verify
 
@@ -121,7 +118,8 @@ $VS plan-segment "$JOB"          # then dispatch, then:
 $VS apply-segment "$JOB"
 ```
 
-Segmenting cuts the word stream into cues. A worker writes the transcript back
+Segmenting cuts the word stream into cues, one timed subtitle line each. A
+worker writes the transcript back
 with a line break where each cue ends and changes nothing else, so it never
 touches an index or a timestamp. `apply-segment` aligns what it wrote against
 what the recogniser heard, which is how a dropped or invented word is reported
@@ -162,11 +160,13 @@ $VS verify "$JOB"
 ```
 
 `verify` exits non-zero on anything mechanically wrong: a moved timestamp, a
-cue or subtitle line not timed exactly like the ASR words it covers, a comma
-that survived, an ASS file with the wrong number of lines, or a source edit that
-added words the speaker did not say. Cues may overlap. Where two people talk at
-once the transcript overlaps, the subtitles keep that timing, and `verify`
-only counts those cues in `overlapping_cues`. Its `adjudicate` list is every place the displayed source diverged from
+cue not timed exactly like the ASR words it covers, an ASS dialogue line not
+timed like its cue, a comma that survived, an ASS file with the wrong number of
+lines, or a source edit that added words the speaker did not say. Cues may
+overlap: where two people talk at once the transcript overlaps, the cues keep
+that timing, and `verify` only counts them in `overlapping_cues`.
+
+Its `adjudicate` list is every place the displayed source diverged from
 what the recogniser heard. Read that list yourself. Each entry should be a
 mishearing, a spelling, a proper name, or filler removal. Anything else is the
 proofreader editing the speaker, and those cues get a targeted rerun:
@@ -214,13 +214,9 @@ $VS timing "$JOB"
 
 The dispatch rows are wall clock, not a sum: workers run together, so a stage
 costs what its slowest worker costs. Each row also carries `first_done` and
-`last_done`, taken from when the result files appeared. `last_done` is when the
-thinking finished; the gap between it and `seconds` is time you spent launching
-and noticing rather than time anyone spent working. On a measured run that gap
-was 18 percent of the job, almost all of it from issuing launch calls one after
-another instead of together.
-
-`apply-<stage>` is the checking, and it rounds to hundredths of a second.
+`last_done`, taken from when the result files appeared. The gap between
+`last_done` and `seconds` is time spent launching and noticing rather than
+working, which is why every worker of a stage is launched in one message.
 
 Report the output paths, that table, and anything that failed or needed a
 rerun. If the user asked for a summary and the media was downloaded, offer
@@ -244,20 +240,14 @@ and ask the user for a file instead of retrying variations.
 
 ## Long videos
 
-Nothing about the pipeline changes with length, but the task counts grow. At
-the rate measured on a real recording, ninety minutes is roughly fourteen
-thousand words and fourteen hundred cues, which at the default batch sizes
-would be thirty six segmentation tasks and thirty six translation tasks.
-
-That is more than some harnesses will run at once, so `--concurrency` is set at
-install and every plan spreads its work across exactly that many workers. With
-ten, that video plans ten translation tasks of 142 cues rather than thirty six
-of forty. With forty it plans forty of thirty six, because the point is to use
-what is there rather than to hold a number down. A batch stops growing at a
-ceiling, past which one worker writes too much in a single answer, and stops
-shrinking at a floor, past which it has lost the speech around what it is
-working on. When the ceiling still leaves more tasks than slots, the plan
-reports `waves`. Follow it rather than working it out from the task count.
+Nothing about the pipeline changes with length, but the task counts grow past
+what some harnesses run at once. `--concurrency`, set at install, is how many
+workers the harness runs together, and every plan spreads its work across that
+many. A batch stops growing at a ceiling, past which one worker writes too much
+in a single answer, and stops shrinking at a floor, past which it loses the
+speech around what it is working on. When the ceiling still leaves more tasks
+than slots, the plan reports `waves`. Follow it rather than working it out from
+the task count.
 
 ## Options worth knowing
 
