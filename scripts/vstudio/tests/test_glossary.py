@@ -125,7 +125,7 @@ def test_the_glossary_reads_the_asr_words_and_never_the_cues(job):
     (job / "cues" / "cues.json").write_text(json.dumps([{"source": "a distinctive cue"}]), encoding="utf-8")
     plan = pipeline.plan_glossary(job, source_language="Japanese", target_language="Chinese")
     assert plan["agent"] == "vstudio-worker-deep" and len(plan["dispatch"]) == 1
-    payload = (tasks.task_dirs(job, "glossary")[0] / "payload.jsonl").read_text(encoding="utf-8")
+    payload = (tasks.task_dirs(job, "glossary")[0] / "payload.txt").read_text(encoding="utf-8")
     assert "ミモザ" in payload and "a distinctive cue" not in payload
 
 

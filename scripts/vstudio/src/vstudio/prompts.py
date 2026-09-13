@@ -76,8 +76,8 @@ def glossary(
 ) -> str:
     return f"""Build the glossary for translating a {source_language} video into {target_language}
 
-Each payload row is one stretch of the whole transcript in order: start end text
-start and end are seconds from the beginning of the video
+The payload is the whole transcript as plain text in order with one line per
+minute of speech
 The text is automatic speech recognition output so a name may be misheard or
 written more than one way
 

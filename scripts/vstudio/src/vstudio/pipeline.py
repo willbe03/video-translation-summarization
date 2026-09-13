@@ -550,7 +550,7 @@ def plan_glossary(
             instructions=instructions,
             page_text=page_text,
         ),
-        payload=stretches,
+        payload="\n".join(s["text"] for s in stretches),
     )
     return tasks.plan(job, "glossary", [directory], stretches=len(stretches),
                       transcript_characters=sum(len(s["text"]) for s in stretches),
