@@ -140,9 +140,10 @@ def build_aligned_chunk(
     start = float(raw_chunk["start"])
     end = float(raw_chunk["end"])
     shifted = offset_words(aligned_words, start, chunk_id=chunk_id)
-    shifted = clamp_words_to_chunk(shifted, chunk_start=start, chunk_end=end)
-    shifted = repair_degenerate_word_times(shifted, chunk_start=start, chunk_end=end)
-    validate_aligned_words(shifted, chunk_start=start, chunk_end=end)
+    if shifted:
+        shifted = clamp_words_to_chunk(shifted, chunk_start=start, chunk_end=end)
+        shifted = repair_degenerate_word_times(shifted, chunk_start=start, chunk_end=end)
+        validate_aligned_words(shifted, chunk_start=start, chunk_end=end)
     return {
         "chunk_id": chunk_id,
         "start": start,
@@ -190,8 +191,9 @@ def transcribe_alignment_chunks(
             parsed = processor.decode(generated_ids, return_format="parsed")[0]
             transcript = str(parsed["transcription"]).strip()
             language = str(parsed.get("language") or "English")
-            if not transcript:
-                raise RuntimeError(f"ASR returned an empty transcript for chunk {chunk_id}")
+            # A silent stretch is ordinary: an intro card, music, a pause
+            # between speakers. Failing the job over one would mean a single
+            # quiet window throws away an hour of transcription.
             records.append(
                 {
                     "chunk_id": chunk_id,
@@ -263,10 +265,16 @@ def align_transcribed_chunks(
 ) -> list[dict[str, Any]]:
     import torch
 
+    if all(not str(raw.get("transcript") or "").strip() for raw in raw_chunks):
+        # Nothing to align, and loading a 600 MB model to prove it is waste.
+        return [build_aligned_chunk(raw, []) for raw in raw_chunks]
     processor, model, device, dtype = load_aligner_model(model_id)
     aligned: list[dict[str, Any]] = []
     try:
         for raw in raw_chunks:
+            if not str(raw.get("transcript") or "").strip():
+                aligned.append(build_aligned_chunk(raw, []))
+                continue
             inputs, word_lists = processor.prepare_forced_aligner_inputs(
                 audio=str(raw["audio"]),
                 transcript=str(raw["transcript"]),
