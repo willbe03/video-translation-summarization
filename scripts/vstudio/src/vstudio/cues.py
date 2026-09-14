@@ -109,6 +109,21 @@ def lexical_weight(text: str) -> float:
     return sum(unit_weight(unit) for unit in split_units(text))
 
 
+def _spoken(word: Mapping[str, Any]) -> bool:
+    return lexical_weight(str(word.get("text", "x"))) > 0
+
+
+def speech_span(words: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The words that are actually spoken.
+
+    A recogniser can time punctuation as a token of its own, sometimes seconds
+    after the speech it closes. It is never heard, so it neither times a cue
+    nor ends a silence. A run with nothing spoken falls back to all its words.
+    """
+    spoken = [word for word in words if _spoken(word)]
+    return spoken or list(words)
+
+
 def join_units(units: Sequence[str]) -> str:
     joined = ""
     for unit in units:
@@ -273,7 +288,7 @@ HANGING_SECONDS = 1.0
 
 def internal_silence(words: Sequence[Mapping[str, Any]]) -> float:
     """The longest stretch inside a run of words during which nobody is speaking."""
-    ordered = sorted(words, key=lambda w: float(w["start"]))
+    ordered = sorted(speech_span(words), key=lambda w: float(w["start"]))
     if not ordered:
         return 0.0
     longest, reached = 0.0, float(ordered[0]["end"])
@@ -281,6 +296,41 @@ def internal_silence(words: Sequence[Mapping[str, Any]]) -> float:
         longest = max(longest, float(word["start"]) - reached)
         reached = max(reached, float(word["end"]))
     return longest
+
+
+# A line held across a short pause keeps a sentence together on screen. Held
+# through two seconds of silence it reads as left behind, so a cue is split
+# there however the segmenter wrote it.
+SPLIT_SILENCE_SECONDS = 2.0
+
+
+def split_at_silences(
+    boundaries: Sequence[Mapping[str, Any]],
+    words: Sequence[Mapping[str, Any]],
+    seconds: float = SPLIT_SILENCE_SECONDS,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Cut every cue wherever nobody speaks for `seconds` or more inside it."""
+    out: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for boundary in boundaries:
+        start, end = int(boundary["start_word"]), int(boundary["end_word"])
+        piece_start, reached = start, None
+        for index in range(start, end + 1):
+            word = words[index]
+            # Punctuation stays with the speech before it, so a piece always
+            # holds something spoken and a split only ever falls between speech.
+            if not _spoken(word):
+                continue
+            if reached is not None and float(word["start"]) - reached >= seconds:
+                silence = float(word["start"]) - reached
+                out.append({"start_word": piece_start, "end_word": index - 1, "text": ""})
+                notes.append(f"split a cue at word {index} across a {silence:.1f}s silence")
+                piece_start, reached = index, float(word["end"])
+                continue
+            reached = float(word["end"]) if reached is None else max(reached, float(word["end"]))
+        text = str(boundary.get("text") or "") if piece_start == start else ""
+        out.append({"start_word": piece_start, "end_word": end, "text": text})
+    return out, notes
 
 
 def display_width(value: str) -> int:
@@ -302,7 +352,8 @@ def boundary_readability_issues(
         if not selected:
             issues.append(f"cue {index} has no words")
             continue
-        duration = max(float(w["end"]) for w in selected) - min(float(w["start"]) for w in selected)
+        spoken = speech_span(selected)
+        duration = max(float(w["end"]) for w in spoken) - min(float(w["start"]) for w in spoken)
         text = str(boundary.get("text") or join_words(selected))
         width = display_width(text)
         if duration > max_duration:
@@ -348,9 +399,9 @@ def build_cues(
             {
                 "id": first_id + offset,
                 # A recogniser can return words slightly out of order where
-                # speech overlaps, so a cue spans all of its words.
-                "start": min(float(w["start"]) for w in selected),
-                "end": max(float(w["end"]) for w in selected),
+                # speech overlaps, so a cue spans all of its spoken words.
+                "start": min(float(w["start"]) for w in speech_span(selected)),
+                "end": max(float(w["end"]) for w in speech_span(selected)),
                 "source": strip_punctuation(source),
                 "source_exact": aligned_text,
                 "start_word": start_word,

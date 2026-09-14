@@ -157,6 +157,9 @@ why a cue never has to span two tasks. The pause threshold is the video's own
 reports it with the number of breaks. `apply-segment` reports readability
 warnings, which are advisory, any boundary it had to repair, and
 `hanging_cues`: cues that stay on screen through a second or more of silence.
+It also splits any cue at a silence of two seconds or more inside it, because a
+line held that long with nobody speaking reads as left behind, and lists each
+split among the boundary repairs.
 
 ```bash
 $VS plan-translate "$JOB" --target-language "<language>" --style "<instructions>"
@@ -229,6 +232,10 @@ $VS apply-synthesize "$JOB"
 $VS check-summary "$JOB"
 ```
 
+Pass `--language` to `plan-summarize` when the summary should be in a language
+other than the one spoken. `plan-synthesize` then writes in the same language
+unless it is given its own `--language`.
+
 The video is split into stretches of about fifteen minutes and one worker takes
 notes on each, in parallel. A second stage assembles them into one summary,
 which is where the chronology and the repetition across stretches get sorted
@@ -237,7 +244,10 @@ source was a URL.
 
 `check-summary` fails when the summary cites a moment past the end of the video
 and warns when the last citation lands in the first three quarters, which
-almost always means only the opening was covered. On that warning, rerun
+almost always means only the opening was covered. It also warns when speech
+ends well before the video does. That is normal for credits or music and is
+also what a transcript that stopped early looks like, so report the gap with
+what you believe caused it. On that warning, rerun
 `plan-summarize` for the parts that were thin rather than regenerating all of
 it.
 

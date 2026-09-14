@@ -44,9 +44,12 @@ def check_summary(
         details["transcript_end"] = last_end
         details["segments"] = len(transcript)
         if duration and last_end < float(duration) - chunk:
-            failures.append(
-                f"transcript stops at {last_end:.0f}s but the video runs {float(duration):.0f}s, "
-                f"a gap of more than {chunk:.0f}s"
+            # Credits, music or a silent ending look exactly like transcription
+            # stopping early, so the gap is surfaced for a reader, not failed.
+            warnings.append(
+                f"speech in the transcript ends at {last_end:.0f}s but the video runs "
+                f"{float(duration):.0f}s; confirm the last {float(duration) - last_end:.0f}s "
+                "has no speech, as with credits or music"
             )
 
     if summary_markdown:

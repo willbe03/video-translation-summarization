@@ -11,16 +11,20 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 # MM:SS or HH:MM:SS. Minutes and seconds stay two digits; hours may be one.
-_CLOCK = r"\d{1,3}:\d{2}(?::\d{2})?"
-# A timestamp optionally followed by a range partner. Either dash is accepted.
-_CITATION = re.compile(rf"[\(\[](?P<start>{_CLOCK})(?:\s*[–-]\s*{_CLOCK})?[\)\]]")
+# Chinese and Japanese text writes the colon full width.
+_CLOCK = r"\d{1,3}[:：]\d{2}(?:[:：]\d{2})?"
+# A timestamp optionally followed by a range partner, in ASCII or full-width
+# brackets, since a summary in Chinese or Japanese writes （02:15）.
+_CITATION = re.compile(
+    rf"[\(\[（【](?P<start>{_CLOCK})(?:\s*[–\-~～—]\s*{_CLOCK})?[\)\]）】]"
+)
 # Spans already inside a markdown link must be left alone so the pass is idempotent.
 _LINKED = re.compile(r"\[[^\]]*\]\([^)]*\)")
 
 
 def parse_timestamp(text: str) -> float | None:
     """Seconds for an MM:SS or HH:MM:SS string, or None if it is neither."""
-    parts = text.strip().split(":")
+    parts = text.strip().replace("：", ":").split(":")
     if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
         return None
     values = [int(p) for p in parts]

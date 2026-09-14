@@ -6,7 +6,13 @@ from conftest import cue_lines, write_lines, write_result
 from conftest import words as timed_words
 from vstudio import jobs, pipeline, tasks
 from vstudio import prompts
-from vstudio.cues import build_cues, lexical_weight, repair_boundaries, strip_punctuation
+from vstudio.cues import (
+    build_cues,
+    lexical_weight,
+    repair_boundaries,
+    split_at_silences,
+    strip_punctuation,
+)
 
 
 def _results(job, stage, values):
@@ -361,11 +367,52 @@ def test_the_pause_threshold_follows_the_video_within_its_bounds():
     assert pipeline.pause_threshold(spaced(0.6)) == pytest.approx(0.6)
 
 
-def test_a_cue_that_stays_on_screen_through_a_silence_is_reported(job):
+def test_a_cue_is_split_where_the_speaker_falls_silent(job):
+    """The segmenter joined words either side of a four second silence."""
     pipeline.plan_segment(_paused(job), language="English", size=100)
     write_lines(tasks.task_dirs(job, "segment")[0], ["one two three four five"])
     result = pipeline.apply_segment(job)
+    cues = json.loads((job / "cues" / "cues.json").read_text())
+    assert [(c["start_word"], c["end_word"]) for c in cues] == [(0, 2), (3, 4)]
+    assert result["hanging_cues"] == 0
+    assert any("silence" in note for note in result["boundary_repairs"])
+
+
+def test_a_short_pause_inside_a_cue_is_kept_and_reported_as_hanging(job):
+    spoken = [{"index": i, "text": t, "start": s, "end": s + 0.3} for i, (t, s) in enumerate(
+        [("one", 0.0), ("two", 0.4), ("three", 2.2)])]
+    (job / "asr").mkdir()
+    (job / "asr" / "words.json").write_text(json.dumps({"words": spoken}), encoding="utf-8")
+    pipeline.plan_segment(job, language="English", size=100)
+    write_lines(tasks.task_dirs(job, "segment")[0], ["one two three"])
+    result = pipeline.apply_segment(job)
+    assert result["cues"] == 1
     assert (result["hanging_cues"], result["hanging_cue_ids"]) == (1, [0])
+
+
+def test_punctuation_timed_late_neither_splits_a_cue_nor_stretches_it():
+    """A recogniser can time a full stop seconds after the speech it closes."""
+    spoken = [{"text": "one", "start": 0.0, "end": 0.4}, {"text": "two", "start": 0.5, "end": 0.9},
+              {"text": "。", "start": 4.0, "end": 4.02}]
+    pieces, notes = split_at_silences([{"start_word": 0, "end_word": 2, "text": ""}], spoken)
+    assert [(p["start_word"], p["end_word"]) for p in pieces] == [(0, 2)] and notes == []
+    cues = build_cues(spoken, pieces)
+    assert (cues[0]["start"], cues[0]["end"]) == (0.0, 0.9)
+
+
+def test_a_split_never_leaves_a_cue_with_nothing_spoken_in_it():
+    spoken = [{"text": "one", "start": 0.0, "end": 0.4}, {"text": "。", "start": 0.4, "end": 0.42},
+              {"text": "two", "start": 3.0, "end": 3.4}, {"text": "、", "start": 7.0, "end": 7.01}]
+    pieces, _ = split_at_silences([{"start_word": 0, "end_word": 3, "text": ""}], spoken)
+    assert [(p["start_word"], p["end_word"]) for p in pieces] == [(0, 1), (2, 3)]
+
+
+def test_splitting_at_silences_keeps_every_word_in_order():
+    spoken = [{"start": 0.0, "end": 0.5}, {"start": 3.0, "end": 3.5}, {"start": 3.6, "end": 4.0},
+              {"start": 9.0, "end": 9.5}]
+    pieces, notes = split_at_silences([{"start_word": 0, "end_word": 3, "text": "kept?"}], spoken)
+    assert [(p["start_word"], p["end_word"]) for p in pieces] == [(0, 0), (1, 2), (3, 3)]
+    assert all(p["text"] == "" for p in pieces) and len(notes) == 2
 
 
 def test_a_cue_spans_its_earliest_start_to_its_latest_end():

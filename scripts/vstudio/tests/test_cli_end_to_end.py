@@ -147,6 +147,17 @@ def test_the_summary_branch_runs_without_cues(run, media):
     assert run("check-summary", job)["ok"]
 
 
+def test_synthesis_writes_in_the_language_the_notes_were_planned_in(run, media):
+    job = Path(run("new", media, "--title", "Paper Books")["job"])
+    run("asr", job, "--provider", "recorded")
+    run("plan-summarize", job, "--language", "Chinese")
+    for directory in tasks.task_dirs(job, "summarize"):
+        (directory / "result.md").write_text("笔记 (00:00)", encoding="utf-8")
+    run("apply-summarize", job)
+    run("plan-synthesize", job)
+    assert "in Chinese" in (tasks.task_dirs(job, "synthesize")[0] / "brief.md").read_text(encoding="utf-8")
+
+
 def test_a_missing_result_exits_one_with_a_sentence(run, media):
     job = Path(run("new", media, "--title", "Paper Books")["job"])
     run("asr", job, "--provider", "recorded")

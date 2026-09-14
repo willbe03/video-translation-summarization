@@ -27,6 +27,7 @@ from vstudio.cues import (
     lexical_weight,
     render_bilingual_ass,
     repair_boundaries,
+    split_at_silences,
     strip_punctuation,
     validate_boundaries,
 )
@@ -243,8 +244,8 @@ def apply_segment(job: Path) -> dict[str, Any]:
             local, count, max_words=prompts.MAX_WORDS_PER_CUE,
             weights=[lexical_weight(str(w["text"])) for w in words[offset : offset + count]],
         )
-        local = repaired
-        repairs.extend(f"{directory.name}: {note}" for note in notes + repair_notes)
+        local, silence_notes = split_at_silences(repaired, words[offset : offset + count])
+        repairs.extend(f"{directory.name}: {note}" for note in notes + repair_notes + silence_notes)
         validate_boundaries(local, count)
         for item in local:
             boundaries.append(

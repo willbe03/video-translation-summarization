@@ -21,6 +21,7 @@ from vstudio.cues import (
     internal_silence,
     join_units,
     lexical_weight,
+    speech_span,
     split_units,
     strip_punctuation,
     unit_weight,
@@ -152,7 +153,7 @@ def _differs_from_asr(cue: Mapping[str, Any], words: Sequence[Mapping[str, Any]]
     first, last = int(cue["start_word"]), int(cue["end_word"])
     if not 0 <= first <= last < len(words):
         return True
-    span = words[first : last + 1]
+    span = speech_span(words[first : last + 1])
     return (abs(float(cue["start"]) - min(float(w["start"]) for w in span)) > 1e-6
             or abs(float(cue["end"]) - max(float(w["end"]) for w in span)) > 1e-6)
 

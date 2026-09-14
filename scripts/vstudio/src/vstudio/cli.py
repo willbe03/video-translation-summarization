@@ -402,9 +402,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_plan_summarize(args: argparse.Namespace) -> int:
     manifest = jobs.read_manifest(args.job)
+    language = (args.language or manifest.get("summary_language")
+                or manifest.get("source_language") or "English")
+    jobs.update_manifest(args.job, summary_language=language)
     emit(pipeline.plan_summarize(
         args.job,
-        language=args.language or manifest.get("source_language") or "English",
+        language=language,
         instructions=args.style or "",
         seconds=args.seconds,
         concurrency=args.concurrency,
@@ -422,7 +425,8 @@ def cmd_plan_synthesize(args: argparse.Namespace) -> int:
     manifest = jobs.read_manifest(args.job)
     emit(pipeline.plan_synthesize(
         args.job,
-        language=args.language or manifest.get("source_language") or "English",
+        language=(args.language or manifest.get("summary_language")
+                  or manifest.get("source_language") or "English"),
         instructions=args.style or "",
     ))
     return 0
