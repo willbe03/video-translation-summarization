@@ -54,6 +54,23 @@ setting good enough for them is the one to use, and segmentation costs more
 than it should as a consequence. Say so in the final report, because the timing
 table will show segmentation taking longer than its share elsewhere.
 
+## When a worker returns HTTP 401 immediately
+
+Every child failing at once, before doing any work, is a credentials problem
+rather than anything about the task. Hermes resolves a child's credentials from
+`delegation` in `config.yaml`, and when `delegation.api_key` is empty it
+inherits the parent session's key. If `delegation.model` points at a different
+provider from the one the main session is using, that key is then sent to the
+wrong endpoint and every worker is refused.
+
+You cannot fix this mid-job; the setting is not reloadable from inside a
+session. Either have the user set `delegation.api_key` for the provider
+`delegation.model` names, or point `delegation.model` at the provider the
+session is already authenticated against. As a way through in the meantime,
+run each brief in its own one-shot hermes process, which authenticates the
+same way the main session does. Say in the final report that the stage ran
+serially, because the timing table will look nothing like a parallel one.
+
 ## What this harness enforces
 
 Not the exec ban, and there is no definition file that could. Hermes derives a

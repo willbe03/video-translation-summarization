@@ -187,3 +187,54 @@ def test_the_timing_table_separates_the_worker_round_from_the_checking(run, medi
     assert "asr" in steps and "dispatch-segment" in steps and "apply-segment" in steps
     report = run("timing", job)
     assert "dispatch-segment" in report and "total" in report
+
+
+def test_a_url_job_links_its_citations_and_counts_them(run, media, capsys, monkeypatch):
+    """The summary branch was only ever tested on a local file, which has no
+    url, so `if url:` never ran and a call that could not work sat in it."""
+    job = Path(run("new", media, "--title", "Paper Books")["job"])
+    manifest = jobs.read_manifest(job)
+    manifest.update({"url": "https://www.youtube.com/watch?v=abc", "site": "YouTube",
+                     "duration": 300.0})
+    jobs.write_manifest(job, manifest)
+    run("asr", job, "--provider", "recorded")
+
+    run("plan-summarize", job)
+    for directory in tasks.task_dirs(job, "summarize"):
+        (directory / "result.md").write_text("Paper wins (00:05)", encoding="utf-8")
+    run("apply-summarize", job)
+    run("plan-synthesize", job)
+    for directory in tasks.task_dirs(job, "synthesize"):
+        (directory / "result.md").write_text(
+            "Opens on paper (00:05) and closes on it (02:30), with one bad cite (99:00)",
+            encoding="utf-8",
+        )
+    result = run("apply-synthesize", job)
+
+    assert result["timestamps_linked"] == 2, "the two citations inside the video"
+    assert [p["kind"] for p in result["citation_problems"]] == ["out_of_range"]
+    summary = Path(result["summary"]).read_text()
+    assert "](https://www.youtube.com/watch?v=abc" in summary
+    assert "(99:00)" in summary, "a citation past the end is reported, not linked"
+
+
+def test_linking_a_summary_twice_changes_nothing(run, media):
+    """apply-synthesize is re-run after a redispatch, so the pass has to be
+    safe to repeat."""
+    job = Path(run("new", media, "--title", "Paper Books")["job"])
+    manifest = jobs.read_manifest(job)
+    manifest.update({"url": "https://www.youtube.com/watch?v=abc", "site": "YouTube",
+                     "duration": 300.0})
+    jobs.write_manifest(job, manifest)
+    run("asr", job, "--provider", "recorded")
+    run("plan-summarize", job)
+    for directory in tasks.task_dirs(job, "summarize"):
+        (directory / "result.md").write_text("Paper wins (00:05)", encoding="utf-8")
+    run("apply-summarize", job)
+    run("plan-synthesize", job)
+    for directory in tasks.task_dirs(job, "synthesize"):
+        (directory / "result.md").write_text("Opens on paper (00:05)", encoding="utf-8")
+    first = run("apply-synthesize", job)
+    again = run("apply-synthesize", job)
+    assert first["timestamps_linked"] == again["timestamps_linked"] == 1
+    assert Path(first["summary"]).read_text() == Path(again["summary"]).read_text()

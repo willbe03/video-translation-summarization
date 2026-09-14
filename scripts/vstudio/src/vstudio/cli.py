@@ -21,7 +21,7 @@ from vstudio.acquire import acquire, describe_source
 from vstudio.cues import join_words
 from vstudio.media import cleanup, media_resolution, resolve_ass_ffmpeg, run, take_frame
 from vstudio.summary import check_summary
-from vstudio.timestamps import linkify_summary
+from vstudio.timestamps import iter_timestamps, linkify_summary
 from vstudio.verify import verify_translation
 
 
@@ -457,12 +457,19 @@ def cmd_apply_synthesize(args: argparse.Namespace) -> int:
     manifest = jobs.read_manifest(args.job)
     text = output.read_text(encoding="utf-8")
     url, site = str(manifest.get("url") or ""), str(manifest.get("site") or "")
-    linked = 0
+    linked, problems = 0, []
     if url:
-        text, linked = linkify_summary(text, url, site)
+        text, problems = linkify_summary(
+            text, url=url, site=site, duration=manifest.get("duration")
+        )
+        # Every citation the pass could turn into a link. Counting the ones
+        # left unlinked instead reports zero, because after the pass those are
+        # exactly the problems.
+        linked = len(iter_timestamps(text, include_linked=True)) - len(problems)
         output.write_text(text, encoding="utf-8")
     jobs.update_manifest(args.job, stage="summarized", summary=str(output))
-    emit({"summary": str(output), "timestamps_linked": linked})
+    emit({"summary": str(output), "timestamps_linked": linked,
+          "citation_problems": problems})
     return 0
 
 
