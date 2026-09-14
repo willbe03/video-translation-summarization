@@ -307,3 +307,20 @@ def test_a_missing_worker_definition_never_blocks_a_job():
     assert "general-purpose" in claude
     body = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert "enforcement upgrade, not a prerequisite" in body
+
+
+def test_every_harness_file_says_what_it_can_do_about_model_and_effort():
+    """A plan asks for a model and an effort. Each platform can honour that to
+    a different degree, and an orchestrator reads only its own file, so each
+    has to answer the question rather than leaving it to the shared one."""
+    for name in ("harness-claude-code.md", "harness-codex.md", "harness-hermes.md"):
+        text = (SKILL / "references" / name).read_text(encoding="utf-8").lower()
+        assert "model" in text and "effort" in text, name
+
+
+def test_the_harness_that_can_honour_neither_says_so_plainly():
+    """Hermes takes both from global config for every child at once, so an
+    orchestrator there must not spend effort trying to tier its workers."""
+    text = (SKILL / "references" / "harness-hermes.md").read_text(encoding="utf-8")
+    assert "delegation.reasoning_effort" in text and "delegation.model" in text
+    assert "cannot be honoured" in text

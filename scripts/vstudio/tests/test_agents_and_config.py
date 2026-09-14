@@ -85,3 +85,23 @@ def test_the_worker_prompt_holds_where_the_harness_cannot_take_the_shell_away():
     prompt = " ".join(agents.SYSTEM_PROMPT.split())
     assert "Do not use a shell for either, even if you have one" in prompt
     assert "Write nothing anywhere except the one result file the brief names" in prompt
+
+
+def test_the_effort_a_plan_reports_is_the_effort_the_worker_runs_at():
+    """It is written twice: STAGES tells the orchestrator, WORKERS goes into
+    the definition file. Nothing else notices when the two disagree, and the
+    symptom is a plan that reports one thing while the worker does another."""
+    from vstudio.tasks import STAGES
+
+    by_name = {w.name: w for w in agents.WORKERS}
+    for name, stage in STAGES.items():
+        assert stage.agent in by_name, f"{name} names a worker that does not ship"
+        assert stage.effort == by_name[stage.agent].effort, name
+
+
+def test_every_stage_maps_onto_a_worker_that_ships_a_model():
+    from vstudio.tasks import STAGES
+
+    by_name = {w.name: w for w in agents.WORKERS}
+    for name, stage in STAGES.items():
+        assert by_name[stage.agent].model in {"sonnet", "opus"}, name

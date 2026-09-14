@@ -27,14 +27,28 @@ worker inside its task.
 Launch every task in a plan at once. They do not depend on each other, and a
 stage takes as long as its slowest worker only if they run together.
 
-## Effort is set by the definition, never by the call
+## Model and effort are set before the call, never in it
 
-No harness here lets you choose effort when you launch a worker. Claude Code
-and Codex read it from the agent definition, and Hermes takes it from global
-config. A worker launched without a definition runs at whatever the session is
-doing, which is usually more thinking than the cheap stage needs. The prompts
-carry the intent as well, so the cost difference is smaller than it looks, but
-it does not disappear.
+No harness here lets you choose either when you launch a worker. Claude Code
+and Codex read both from the agent definition; Hermes has no agent file and
+takes both from global config, the same for every child.
+
+So a plan's `agent` and `effort` are what the stage wants, not a promise about
+what it will get. How close you can come depends on where you are running, and
+your own harness file says which of these you are in:
+
+| | model per worker | effort per worker |
+| --- | --- | --- |
+| Claude Code, definitions loaded | yes | yes |
+| Claude Code, falling back | yes, passed to the call | no, the session's |
+| Codex, definitions installed | yes | yes |
+| Hermes | no, one setting for all | no, one setting for all |
+
+Losing them costs money and time rather than correctness: an under-powered
+worker on a judgement stage is the risk, and an over-powered one on the cheap
+stage is only waste. The briefs carry the intent in words as well, which is why
+the segmentation brief says the pass is mechanical, so the gap is narrower than
+the table suggests. Report which row you were in when you finish.
 
 
 ## Definitions are an upgrade, not a requirement

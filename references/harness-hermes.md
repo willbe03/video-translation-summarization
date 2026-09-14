@@ -35,6 +35,25 @@ After that a plan either fits in one call or tells you how many to send per
 group. A ninety minute video plans ten translation tasks of 142 cues rather
 than thirty six of forty, which also reads better across cue boundaries.
 
+## Model and effort are one setting for every worker
+
+`delegate_task` takes a goal, a context and an output schema. It takes no model
+and no reasoning effort, and there is no agent file here to put them in. Both
+come from `delegation.model` and `delegation.reasoning_effort` in config, which
+apply to every child equally, so the tiering in a plan cannot be honoured: the
+cheap segmentation worker and the proofreader run identically.
+
+Ignore the `agent` and `effort` fields in the plan output. Nothing you can pass
+will change either, and there is no fallback that recovers them the way there
+is on Claude Code. What survives is the wording, since the segmentation brief
+tells the worker the pass is mechanical, which is why that line exists.
+
+Pick the config once for the whole job rather than per stage. Proofreading,
+glossary and coherence are the stages that decide what a person meant, so a
+setting good enough for them is the one to use, and segmentation costs more
+than it should as a consequence. Say so in the final report, because the timing
+table will show segmentation taking longer than its share elsewhere.
+
 ## What this harness enforces
 
 Not the exec ban, and there is no definition file that could. Hermes derives a
