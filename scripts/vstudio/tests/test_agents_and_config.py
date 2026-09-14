@@ -44,9 +44,8 @@ def test_claude_workers_get_read_and_write_and_nothing_else(tmp_path):
 def test_no_worker_runs_below_sonnet():
     """The cheap stage is cheap because it thinks less, not because it knows
     less, so a smaller model saves nothing and costs cue quality."""
-    assert {w.model for w in agents.WORKERS} == {"sonnet", "opus"}
-    light = next(w for w in agents.WORKERS if w.name.endswith("light"))
-    assert light.model == "sonnet" and light.effort == "low"
+    assert {model for model, _ in agents.TIER_DEFAULTS.values()} == {"sonnet", "opus"}
+    assert agents.TIER_DEFAULTS["light"] == ("sonnet", "low")
 
 
 def test_install_can_be_undone(tmp_path):
@@ -59,7 +58,7 @@ def test_install_can_be_undone(tmp_path):
 
 def test_codex_workers_carry_the_same_prompt(tmp_path):
     written = agents.install(tmp_path, harness="codex", skill_dir=tmp_path)
-    assert len(written) == len(agents.WORKERS)
+    assert len(written) == len(agents.workers())
     text = written[0].read_text()
     assert "model_reasoning_effort" in text
     assert "Do not use a shell for either" in text
@@ -87,21 +86,53 @@ def test_the_worker_prompt_holds_where_the_harness_cannot_take_the_shell_away():
     assert "Write nothing anywhere except the one result file the brief names" in prompt
 
 
-def test_the_effort_a_plan_reports_is_the_effort_the_worker_runs_at():
-    """It is written twice: STAGES tells the orchestrator, WORKERS goes into
-    the definition file. Nothing else notices when the two disagree, and the
-    symptom is a plan that reports one thing while the worker does another."""
+def test_the_effort_a_plan_reports_is_the_effort_the_worker_runs_at(tmp_path, monkeypatch):
+    """A plan and its worker definition must agree even after a tier is
+    changed, which is why the effort is derived from the tier rather than
+    stored beside the stage."""
+    from vstudio import tasks
+
+    monkeypatch.setenv(agents.tier_env_name("deep"), "sonnet/medium")
+    written = {p.stem: p.read_text() for p in
+               agents.install(tmp_path, harness="claude", skill_dir=tmp_path)}
+    for name, stage in tasks.STAGES.items():
+        plan = tasks.plan(tmp_path, name, [])
+        assert plan["agent"] == stage.agent, name
+        assert f"effort: {plan['effort']}" in written[stage.agent], name
+        assert f"model: {plan['model']}" in written[stage.agent], name
+    assert tasks.plan(tmp_path, "proofread", [])["effort"] == "medium"
+
+
+def test_every_stage_maps_onto_a_tier_that_ships():
     from vstudio.tasks import STAGES
 
-    by_name = {w.name: w for w in agents.WORKERS}
+    shipped = {w.name for w in agents.workers()}
     for name, stage in STAGES.items():
-        assert stage.agent in by_name, f"{name} names a worker that does not ship"
-        assert stage.effort == by_name[stage.agent].effort, name
+        assert stage.agent in shipped, f"{name} names a worker that does not ship"
 
 
-def test_every_stage_maps_onto_a_worker_that_ships_a_model():
-    from vstudio.tasks import STAGES
+def test_a_tier_can_be_changed_without_touching_python(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    jobs.write_config({agents.tier_env_name("light"): "opus/xhigh"})
+    jobs.load_config()
+    assert agents.tier("light") == ("opus", "xhigh")
+    assert agents.worker("light").model == "opus"
 
-    by_name = {w.name: w for w in agents.WORKERS}
-    for name, stage in STAGES.items():
-        assert by_name[stage.agent].model in {"sonnet", "opus"}, name
+
+def test_a_mistyped_tier_is_refused_rather_than_quietly_ignored():
+    """The only symptom of a silently wrong tier is a bill."""
+    for bad in ("sonnet", "sonnet/", "/low", "sonnet/lo", ""):
+        with pytest.raises(RuntimeError):
+            agents.parse_tier(bad)
+    with pytest.raises(RuntimeError, match="unknown tier"):
+        agents.tier("gigantic")
+
+
+def test_the_defaults_are_what_was_measured():
+    """Changing these is a decision, not a refactor: low effort on the light
+    tier was a three quarter saving with no loss in cue quality."""
+    assert agents.TIER_DEFAULTS == {
+        "light": ("sonnet", "low"),
+        "standard": ("sonnet", "high"),
+        "deep": ("opus", "high"),
+    }

@@ -58,6 +58,15 @@ def cmd_configure(args: argparse.Namespace) -> int:
         values[jobs.PROVIDER_ENV] = args.provider
     if args.concurrency:
         values[pipeline.CONCURRENCY_ENV] = str(args.concurrency)
+    for setting in args.tier or []:
+        name, _, spec = setting.partition("=")
+        name = name.strip().lower()
+        if name not in agents.TIER_DEFAULTS:
+            raise RuntimeError(
+                f"unknown tier {name!r}; known: {', '.join(sorted(agents.TIER_DEFAULTS))}"
+            )
+        model, effort = agents.parse_tier(spec)
+        values[agents.tier_env_name(name)] = f"{model}/{effort}"
     path = jobs.write_config(values)
     emit({"config": str(path), "settings": jobs.load_config()})
     return 0
@@ -69,6 +78,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "settings": jobs.load_config(),
         "artifacts_root": str(jobs.artifacts_root()),
         "skill_dir": str(_skill_dir()),
+        # Resolved, not the defaults, so a configured tier is visible here
+        # rather than only in whatever the agent files happen to say.
+        "tiers": {
+            name: f"{model}/{effort}"
+            for name in sorted(agents.TIER_DEFAULTS)
+            for model, effort in [agents.tier(name)]
+        },
         "providers": {},
     }
     for name in ("ffmpeg", "ffprobe"):
@@ -535,6 +551,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", choices=asr.backend_names(), help="default ASR provider")
     p.add_argument("--concurrency", type=int,
                    help="how many workers this harness runs at once, for example 10 on Hermes")
+    p.add_argument("--tier", action="append", metavar="NAME=MODEL/EFFORT",
+                   help="what a worker tier means, for example deep=opus/high. Repeatable. "
+                        f"Tiers: {', '.join(sorted(agents.TIER_DEFAULTS))}")
     p.set_defaults(handler=cmd_configure)
 
     p = sub.add_parser("install-agents", help="write the worker definitions for a harness")

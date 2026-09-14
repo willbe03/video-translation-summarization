@@ -16,6 +16,7 @@ of quotes and the failure is silent.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,27 +51,78 @@ class WorkerDefinition:
     description: str
 
 
-# Sonnet is the floor. A smaller model saves nothing here: the cheap stage is
-# cheap because it thinks less, not because it knows less, and a cue boundary
-# in the wrong place costs a proofreading round later.
-WORKERS = (
-    WorkerDefinition(
-        "vstudio-worker-light", "low", "sonnet",
-        "Splits a transcript into subtitle cues from a brief file. "
-        "Launched by the video subtitling orchestrator, not directly.",
-    ),
-    WorkerDefinition(
-        "vstudio-worker-standard", "high", "sonnet",
-        "Translates cues or takes notes on a video from a brief file. "
-        "Launched by the video subtitling orchestrator, not directly.",
-    ),
-    WorkerDefinition(
-        "vstudio-worker-deep", "high", "opus",
-        "Proofreads subtitles, builds a glossary, makes a subtitle set consistent, "
-        "or assembles a summary from a brief file. "
-        "Launched by the video subtitling orchestrator, not directly.",
-    ),
-)
+NAME_PREFIX = "vstudio-worker-"
+
+# What each tier means, unless configured otherwise. These are measured rather
+# than guessed: on a real job the light tier at low effort cut segmentation
+# wall clock and tokens by about three quarters with no loss in cue quality,
+# and Sonnet is the floor because the cheap stage is cheap by thinking less,
+# not by knowing less. Change them deliberately.
+TIER_DEFAULTS: dict[str, tuple[str, str]] = {
+    "light": ("sonnet", "low"),
+    "standard": ("sonnet", "high"),
+    "deep": ("opus", "high"),
+}
+
+TIER_ENV_PREFIX = "VSTUDIO_TIER_"
+
+_DESCRIPTIONS = {
+    "light": "Splits a transcript into subtitle cues from a brief file. "
+             "Launched by the video subtitling orchestrator, not directly.",
+    "standard": "Translates cues or takes notes on a video from a brief file. "
+                "Launched by the video subtitling orchestrator, not directly.",
+    "deep": "Proofreads subtitles, builds a glossary or assembles a summary from a "
+            "brief file. Launched by the video subtitling orchestrator, not directly.",
+}
+
+
+def tier_env_name(tier: str) -> str:
+    return f"{TIER_ENV_PREFIX}{tier.upper()}"
+
+
+def parse_tier(value: str) -> tuple[str, str]:
+    """Read a `model/effort` setting, rejecting anything unusable.
+
+    A typo here silently changes which model does the work, so this refuses
+    rather than falling back: a job running on the wrong tier is expensive and
+    the only symptom is a bill.
+    """
+    model, _, effort = str(value).strip().partition("/")
+    model, effort = model.strip().lower(), effort.strip().lower()
+    if not model or not effort:
+        raise RuntimeError(f"{value!r} is not a tier; write it as model/effort, e.g. sonnet/low")
+    if effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise RuntimeError(f"{effort!r} is not an effort; use low, medium, high, xhigh or max")
+    return model, effort
+
+
+def tier(name: str) -> tuple[str, str]:
+    """The model and effort for one tier, from the environment or the default."""
+    if name not in TIER_DEFAULTS:
+        raise RuntimeError(f"unknown tier {name!r}; known: {', '.join(sorted(TIER_DEFAULTS))}")
+    configured = os.environ.get(tier_env_name(name))
+    return parse_tier(configured) if configured else TIER_DEFAULTS[name]
+
+
+def tier_of(worker_name: str) -> str:
+    return worker_name[len(NAME_PREFIX):] if worker_name.startswith(NAME_PREFIX) else worker_name
+
+
+def worker(tier_name: str) -> WorkerDefinition:
+    model, effort = tier(tier_name)
+    return WorkerDefinition(
+        f"{NAME_PREFIX}{tier_name}", effort, model, _DESCRIPTIONS[tier_name]
+    )
+
+
+def workers() -> tuple[WorkerDefinition, ...]:
+    """The shipped workers as currently configured.
+
+    A function rather than a constant because the tiers are settings now, and
+    a module-level tuple would freeze whatever the environment held at import.
+    """
+    return tuple(worker(name) for name in TIER_DEFAULTS)
+
 
 ORCHESTRATOR = WorkerDefinition(
     "vstudio-orchestrator", "medium", "inherit",
@@ -142,9 +194,9 @@ developer_instructions = """
 def definition_names(harness: str) -> list[str]:
     """What install would write, so remove can find it again."""
     if harness == "claude":
-        return [f"{w.name}.md" for w in WORKERS] + [f"{ORCHESTRATOR.name}.md"]
+        return [f"{w.name}.md" for w in workers()] + [f"{ORCHESTRATOR.name}.md"]
     if harness == "codex":
-        return [f"{w.name}.toml" for w in WORKERS]
+        return [f"{w.name}.toml" for w in workers()]
     return []
 
 
@@ -169,7 +221,7 @@ def install(dest: Path, *, harness: str, skill_dir: Path) -> list[Path]:
     dest.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     if harness == "claude":
-        for worker in WORKERS:
+        for worker in workers():
             path = dest / f"{worker.name}.md"
             path.write_text(claude_worker(worker), encoding="utf-8")
             written.append(path)
@@ -177,7 +229,7 @@ def install(dest: Path, *, harness: str, skill_dir: Path) -> list[Path]:
         path.write_text(claude_orchestrator(skill_dir), encoding="utf-8")
         written.append(path)
     elif harness == "codex":
-        for worker in WORKERS:
+        for worker in workers():
             path = dest / f"{worker.name}.toml"
             path.write_text(codex_worker(worker), encoding="utf-8")
             written.append(path)

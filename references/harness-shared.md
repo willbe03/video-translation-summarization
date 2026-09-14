@@ -44,6 +44,11 @@ your own harness file says which of these you are in:
 | Codex, definitions installed | yes | yes |
 | Hermes | no, one setting for all | no, one setting for all |
 
+The tiers themselves are settings, not code: `vstudio doctor` prints what is
+in force and `vstudio configure --tier` changes it. You do not need to, and
+should not on your own initiative; it matters here only because the plan's
+`model` and `effort` reflect that configuration rather than a fixed table.
+
 Losing them costs money and time rather than correctness: an under-powered
 worker on a judgement stage is the risk, and an over-powered one on the cheap
 stage is only waste. The briefs carry the intent in words as well, which is why

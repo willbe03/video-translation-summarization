@@ -58,5 +58,4 @@ def test_a_missing_result_names_the_task_to_re_dispatch(tmp_path):
 
 def test_every_stage_declares_an_effort_and_a_worker():
     for name, stage in tasks.STAGES.items():
-        assert stage.effort in {"low", "medium", "high"}, name
         assert stage.agent.startswith("vstudio-worker-"), name

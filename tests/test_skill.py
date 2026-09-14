@@ -204,18 +204,20 @@ def test_every_stage_declares_an_effort_suited_to_its_work():
     sys.path.insert(0, str(SRC.parent))
     from vstudio import tasks
 
-    assert tasks.STAGES["segment"].effort == "low"
-    assert tasks.STAGES["translate"].effort == "high"
-    assert tasks.STAGES["proofread"].effort == "high"
+    from vstudio import agents
+
+    assert agents.tier(agents.tier_of(tasks.STAGES["segment"].agent))[1] == "low"
+    assert agents.tier(agents.tier_of(tasks.STAGES["translate"].agent))[1] == "high"
+    assert agents.tier(agents.tier_of(tasks.STAGES["proofread"].agent))[1] == "high"
     for stage in ("glossary", "cohere"):
-        assert (tasks.STAGES[stage].agent, tasks.STAGES[stage].effort) == ("vstudio-worker-deep", "high")
+        assert tasks.STAGES[stage].agent == "vstudio-worker-deep"
 
 
 def test_no_worker_runs_below_sonnet():
     sys.path.insert(0, str(SRC.parent))
     from vstudio import agents
 
-    assert {w.model for w in agents.WORKERS} <= {"sonnet", "opus"}
+    assert {model for model, _ in agents.TIER_DEFAULTS.values()} <= {"sonnet", "opus"}
 
 
 def test_a_worker_cannot_run_a_command_on_claude_code(tmp_path):

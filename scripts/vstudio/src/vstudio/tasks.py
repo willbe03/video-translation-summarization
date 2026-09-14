@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import re
 import time
+
+from vstudio import agents
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -32,8 +34,10 @@ class Stage:
     name: str
     # Which shipped worker definition to launch. All three have the same Read
     # and Write access and differ in model and how hard they are asked to think.
+    # The effort is not stored beside it: it belongs to the tier, and keeping a
+    # second copy here meant a plan could report one thing while the worker ran
+    # at another.
     agent: str
-    effort: str
     purpose: str
     # A stage returns JSON only when its answer really has fields. Cue breaks
     # and translations are lines of text, and measured on a real job more than
@@ -43,27 +47,19 @@ class Stage:
 
 STAGES: dict[str, Stage] = {
     # Splitting a word list at clause boundaries is pattern work, not reasoning.
-    "segment": Stage(
-        "segment", "vstudio-worker-light", "low", "cut words into cues", RESULT_TEXT
-    ),
-    "translate": Stage(
-        "translate", "vstudio-worker-standard", "high", "translate cues", RESULT_TEXT
-    ),
+    "segment": Stage("segment", "vstudio-worker-light", "cut words into cues", RESULT_TEXT),
+    "translate": Stage("translate", "vstudio-worker-standard", "translate cues", RESULT_TEXT),
     # The proofreader is the only stage that can silently damage the speaker's
     # words, so it gets the most capable model as well as the effort.
-    "proofread": Stage("proofread", "vstudio-worker-deep", "high", "repair ASR and polish"),
+    "proofread": Stage("proofread", "vstudio-worker-deep", "repair ASR and polish"),
     # A name has to read the same everywhere, and only a reader who sees every
     # use can decide how, so one worker reads the whole transcript.
-    "glossary": Stage("glossary", "vstudio-worker-deep", "high", "decide names and terms"),
+    "glossary": Stage("glossary", "vstudio-worker-deep", "decide names and terms"),
     # The only stage that sees every cue at once, so tone and names can be made
     # consistent across stretches no single proofreader saw.
-    "cohere": Stage("cohere", "vstudio-worker-deep", "high", "make the whole set consistent"),
-    "summarize": Stage(
-        "summarize", "vstudio-worker-standard", "high", "note one part", RESULT_MARKDOWN
-    ),
-    "synthesize": Stage(
-        "synthesize", "vstudio-worker-deep", "high", "assemble the summary", RESULT_MARKDOWN
-    ),
+    "cohere": Stage("cohere", "vstudio-worker-deep", "make the whole set consistent"),
+    "summarize": Stage("summarize", "vstudio-worker-standard", "note one part", RESULT_MARKDOWN),
+    "synthesize": Stage("synthesize", "vstudio-worker-deep", "assemble the summary", RESULT_MARKDOWN),
 }
 
 
@@ -157,7 +153,8 @@ def plan(job: Path, stage: str, directories: Sequence[Path], **extra: Any) -> di
     return {
         "stage": stage,
         "agent": spec.agent,
-        "effort": spec.effort,
+        "effort": agents.tier(agents.tier_of(spec.agent))[1],
+        "model": agents.tier(agents.tier_of(spec.agent))[0],
         "purpose": spec.purpose,
         "parallel": True,
         "dispatch": [str(d / BRIEF) for d in directories],

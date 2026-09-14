@@ -95,6 +95,33 @@ uv run --project scripts/vstudio vstudio configure --provider mai
 
 A third backend is a class with four methods; see `scripts/vstudio/src/vstudio/asr/base.py`.
 
+## Optional: what a worker tier means
+
+Three tiers cover every stage, and each is a model and an effort:
+
+```
+light     sonnet/low    cutting a transcript into cues
+standard  sonnet/high   translating, taking notes
+deep      opus/high     proofreading, the glossary, coherence, the summary
+```
+
+Those are measured, not guessed. The light tier at low effort cut segmentation
+wall clock and tokens by about three quarters with no loss in cue quality, and
+Sonnet is the floor because the cheap stage is cheap by thinking less rather
+than by knowing less. Leave them alone unless you have a reason.
+
+When you do have one, a different account or a tighter budget, set it rather
+than editing the code:
+
+```bash
+uv run --project scripts/vstudio vstudio configure --tier deep=sonnet/high
+```
+
+Repeat `--tier` for more than one. A typo is refused rather than ignored,
+because a silently wrong tier shows up only on the bill. `vstudio doctor`
+prints what is actually in force, and `install-agents` writes it into the
+definitions, so rerun that after changing anything.
+
 ## Step 4: the worker definitions
 
 This step is optional. The skill runs without it, because a worker's
