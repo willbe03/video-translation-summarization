@@ -242,6 +242,11 @@ which is where the chronology and the repetition across stretches get sorted
 out. `apply-synthesize` turns the cited timestamps into deep links when the
 source was a URL.
 
+The summary's length follows the video's: the assembly brief asks for about 50
+words per minute of video, never under 200, and `plan-synthesize` reports the
+figure as `target_words`. A length the user asked for goes in `--style` on
+`plan-synthesize` and overrides it.
+
 `check-summary` fails when the summary cites a moment past the end of the video
 and warns when the last citation lands in the first three quarters, which
 almost always means only the opening was covered. It also warns when speech

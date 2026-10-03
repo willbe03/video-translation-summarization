@@ -86,6 +86,20 @@ def test_a_summary_worker_must_cite_timestamps():
     assert "Every paragraph needs at least one citation" in body
 
 
+def test_a_longer_video_asks_for_a_longer_summary():
+    assert prompts.summary_word_target(60) == prompts.SUMMARY_MIN_WORDS
+    assert prompts.summary_word_target(20 * 60) == 1000
+    assert prompts.summary_word_target(60 * 60) == 3000
+    assert prompts.summary_word_target(120 * 60) == 6000
+    body = prompts.synthesize(title="t", language="English", duration=60 * 60)
+    assert "about 60 minutes so aim for about 3000 words" in body
+
+
+def test_a_summary_without_a_known_duration_gets_no_length_target():
+    assert prompts.summary_word_target(None) is None
+    assert "aim for about" not in prompts.synthesize(title="t", language="English")
+
+
 def test_the_mechanical_stage_asks_the_worker_not_to_deliberate():
     """Effort is a property of an agent definition, and two of the three
     harnesses cannot set one per task, so the prompt is the only portable way

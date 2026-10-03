@@ -746,6 +746,7 @@ def apply_summarize(job: Path) -> dict[str, Any]:
 def plan_synthesize(job: Path, *, language: str, instructions: str = "") -> dict[str, Any]:
     notes = _read(job, "summary", "notes.json")
     manifest = _read(job, "manifest.json")
+    duration = manifest.get("duration")
     tasks.reset_stage(job, "synthesize")
     directory = tasks.write_task(
         job, "synthesize", 0, 1,
@@ -753,10 +754,12 @@ def plan_synthesize(job: Path, *, language: str, instructions: str = "") -> dict
             title=str(manifest.get("title") or job.name),
             language=language,
             instructions=instructions,
+            duration=duration,
         ),
         payload=notes,
     )
-    return tasks.plan(job, "synthesize", [directory], parts=len(notes))
+    return tasks.plan(job, "synthesize", [directory], parts=len(notes),
+                      target_words=prompts.summary_word_target(duration))
 
 
 def apply_synthesize(job: Path) -> Path:

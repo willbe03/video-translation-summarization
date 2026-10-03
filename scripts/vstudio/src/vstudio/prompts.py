@@ -278,7 +278,40 @@ Write your notes to the result file as plain Markdown. No JSON wrapper, no
 front matter, no heading naming the part."""
 
 
-def synthesize(*, title: str, language: str, instructions: str = "") -> str:
+# A summary grows with its video. Fifty words a minute is about what videos of
+# twenty to eighty minutes were getting unprompted, while a six-minute one got
+# three times that, so the rate holds the middle steady and pulls the ends into
+# proportion. The floor keeps a clip of a minute or two from collapsing into
+# one sentence.
+SUMMARY_WORDS_PER_MINUTE = 50
+SUMMARY_MIN_WORDS = 200
+
+
+def summary_word_target(duration: float | None) -> int | None:
+    """Words to aim for in the summary of a video this long, to the nearest 50."""
+    if not duration or duration <= 0:
+        return None
+    words = duration / 60 * SUMMARY_WORDS_PER_MINUTE
+    return max(SUMMARY_MIN_WORDS, round(words / 50) * 50)
+
+
+def _length_rule(duration: float | None) -> str:
+    target = summary_word_target(duration)
+    if target is None:
+        return ""
+    minutes = max(1, round(duration / 60))
+    return (
+        f"\nThe video runs about {minutes} minutes so aim for about {target} words"
+        "\nCount two Chinese Japanese or Korean characters as one word"
+        "\nThe length follows the video A longer video gets a longer summary so do"
+        "\nnot compress the notes below this length and do not pad past what they hold"
+        "\nAn instruction below that asks for a different length wins"
+    )
+
+
+def synthesize(
+    *, title: str, language: str, instructions: str = "", duration: float | None = None
+) -> str:
     return f"""Assemble one summary of a video from notes on its consecutive parts
 
 Each payload row is notes on one part in order: part start end notes
@@ -288,7 +321,7 @@ Keep every (MM:SS) citation attached to the point it supports and do not invent
 new ones
 Merge repetition across parts and keep the chronology of the video
 Open with a short paragraph saying what the video is then cover the substance
-Write prose in short paragraphs not a bulleted outline
+Write prose in short paragraphs not a bulleted outline{_length_rule(duration)}
 
 {instructions or ""}
 
