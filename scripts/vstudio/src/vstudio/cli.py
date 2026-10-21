@@ -356,19 +356,22 @@ def cmd_glossary_report(args: argparse.Namespace) -> int:
 
 
 def cmd_render(args: argparse.Namespace) -> int:
+    manifest = jobs.read_manifest(args.job)
+    subtitle_format = args.format or manifest.get("subtitle_format") or "srt"
     with jobs.timed(args.job, "render"):
-        output = pipeline.render(args.job, font=args.font)
-    result: dict[str, Any] = {"subtitles": str(output)}
+        output = pipeline.render(args.job, subtitle_format=subtitle_format, font=args.font)
+    result: dict[str, Any] = {"subtitles": str(output), "subtitle_format": subtitle_format}
     if args.burn:
-        manifest = jobs.read_manifest(args.job)
         media = Path(manifest["media"])
         burned = args.job / "out" / f"{args.job.name}-subtitled.mp4"
+        styled = output if subtitle_format == "ass" else pipeline.render(
+            args.job, subtitle_format="ass", font=args.font, output=args.job / "cues" / "burn.ass")
         with jobs.timed(args.job, "burn"):
             size = media_resolution(media)
             if not size:
                 raise RuntimeError(f"{media} has no video stream to burn subtitles into")
             run([resolve_ass_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-                 "-i", str(media), "-vf", f"ass={_filter_path(output)}",
+                 "-i", str(media), "-vf", f"ass={_filter_path(styled)}",
                  "-c:a", "copy", str(burned)])
         result["video"] = str(burned)
     jobs.update_manifest(args.job, stage="rendered", **result)
@@ -395,14 +398,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
     draft_path = job / "cues" / "translated.json"
     draft = json.loads(draft_path.read_text(encoding="utf-8")) if draft_path.is_file() else None
     subs = manifest.get("subtitles")
-    dialogue = codec = times = None
+    count = subtitle_format = times = None
     if subs and Path(subs).is_file():
         text = Path(subs).read_text(encoding="utf-8-sig")
-        events = [line[len("Dialogue:"):].split(",", 3) for line in text.splitlines()
-                  if line.startswith("Dialogue:")]
-        dialogue = len(events)
-        times = [(event[1].strip(), event[2].strip()) for event in events if len(event) > 2]
-        codec = "ass" if "[V4+ Styles]" in text else "unknown"
+        if Path(subs).suffix == ".srt":
+            subtitle_format = "srt"
+            blocks = [block.splitlines() for block in text.replace("\r\n", "\n").split("\n\n") if block.strip()]
+            count = len(blocks)
+            times = [tuple(part.strip() for part in block[1].split("-->", 1))
+                     for block in blocks if len(block) > 1 and "-->" in block[1]]
+        else:
+            events = [line[len("Dialogue:"):].split(",", 3) for line in text.splitlines()
+                      if line.startswith("Dialogue:")]
+            count = len(events)
+            times = [(event[1].strip(), event[2].strip()) for event in events if len(event) > 2]
+            subtitle_format = "ass" if "[V4+ Styles]" in text else "unknown"
     words_path = job / "asr" / "words.json"
     words = (json.loads(words_path.read_text(encoding="utf-8"))["words"]
              if words_path.is_file() else None)
@@ -410,7 +420,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     entries = (json.loads(glossary_path.read_text(encoding="utf-8"))
                if glossary_path.is_file() else None)
     report = verify_translation(manifest, final, draft, words,
-                                ass_dialogue_count=dialogue, ass_codec=codec, ass_times=times,
+                                subtitle_count=count, subtitle_format=subtitle_format,
+                                subtitle_times=times,
                                 glossary_entries=entries)
     emit(report)
     return 0 if report["ok"] else 1
@@ -625,8 +636,10 @@ def build_parser() -> argparse.ArgumentParser:
     job_command("glossary-report", cmd_glossary_report,
                 "measure the glossary and how each stage follows it")
 
-    p = job_command("render", cmd_render, "write the bilingual ass file")
-    p.add_argument("--font", default="Arial")
+    p = job_command("render", cmd_render, "write the bilingual subtitle file")
+    p.add_argument("--format", choices=pipeline.SUBTITLE_FORMATS,
+                   help="srt or ass; defaults to the job's last render, else srt")
+    p.add_argument("--font", default="Arial", help="font for ass output and burned video")
     p.add_argument("--burn", action="store_true", help="also burn the subtitles into the video")
 
     job_command("verify", cmd_verify, "check the finished translation mechanically")

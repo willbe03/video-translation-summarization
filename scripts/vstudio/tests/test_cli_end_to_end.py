@@ -104,9 +104,17 @@ def test_a_local_file_goes_all_the_way_to_subtitles(run, media, capsys, tmp_path
     run("apply-cohere", job)
 
     subtitles = Path(run("render", job)["subtitles"])
+    assert subtitles.suffix == ".srt"
+    assert len(subtitles.read_text(encoding="utf-8").strip().split("\n\n")) == cue_count
+    report = run("verify", job)
+    assert report["ok"], report["failures"]
+    assert report["details"]["subtitle_entries"] == cue_count
+
+    subtitles = Path(run("render", job, "--format", "ass")["subtitles"])
     dialogue = [l for l in subtitles.read_text(encoding="utf-8-sig").splitlines()
                 if l.startswith("Dialogue:")]
     assert len(dialogue) == cue_count
+    assert Path(run("render", job)["subtitles"]).suffix == ".ass"
 
     report = run("verify", job)
     assert report["ok"], report["failures"]

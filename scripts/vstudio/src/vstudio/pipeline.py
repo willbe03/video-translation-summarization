@@ -26,6 +26,7 @@ from vstudio.cues import (
     join_words,
     lexical_weight,
     render_bilingual_ass,
+    render_bilingual_srt,
     repair_boundaries,
     split_at_silences,
     strip_punctuation,
@@ -639,13 +640,22 @@ def apply_cohere(job: Path) -> dict[str, Any]:
 # --- render ---
 
 
-def render(job: Path, *, font: str = "Arial") -> Path:
+SUBTITLE_FORMATS = ("srt", "ass")
+
+
+def render(job: Path, *, subtitle_format: str = "srt", font: str = "Arial",
+           output: Path | None = None) -> Path:
+    if subtitle_format not in SUBTITLE_FORMATS:
+        raise ValueError(f"unknown subtitle format {subtitle_format!r}; choose one of {SUBTITLE_FORMATS}")
     manifest = _read(job, "manifest.json")
     source = job / "cues" / "final.json"
     if not source.is_file():
         source = job / "cues" / "translated.json"
     cues = json.loads(source.read_text(encoding="utf-8"))
-    output = job / "out" / f"{job.name}.ass"
+    output = output or job / "out" / f"{job.name}.{subtitle_format}"
+    if subtitle_format == "srt":
+        render_bilingual_srt(cues, output)
+        return output
     render_bilingual_ass(
         cues,
         output,

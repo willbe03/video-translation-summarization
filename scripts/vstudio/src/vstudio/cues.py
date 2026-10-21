@@ -436,6 +436,14 @@ def ass_timestamp(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}.{cs:02d}"
 
 
+def srt_timestamp(seconds: float) -> str:
+    milliseconds = max(0, round(float(seconds) * 1000))
+    hours, remainder = divmod(milliseconds, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    secs, ms = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
 def _ass_text(value: str) -> str:
     return (
         value.replace("\\", r"\\")
@@ -480,3 +488,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+
+
+def _srt_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def render_bilingual_srt(segments: Sequence[Mapping[str, Any]], output: Path) -> None:
+    blocks = []
+    for number, segment in enumerate(segments, start=1):
+        source = _srt_text(strip_punctuation(str(segment["source"])))
+        translation = _srt_text(strip_punctuation(str(segment["translation"])))
+        timing = f"{srt_timestamp(float(segment['start']))} --> {srt_timestamp(float(segment['end']))}"
+        blocks.append(f"{number}\n{timing}\n{source}\n{translation}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")

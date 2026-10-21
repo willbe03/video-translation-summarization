@@ -7,7 +7,7 @@
     "expected_behavior": [
       "Launches one orchestrator subagent instead of running any pipeline step in the main session",
       "Does not transcribe, translate or summarize anything in the main session",
-      "Reports the path of the .ass file and the per-step timing table the orchestrator returns"
+      "Reports the path of the .srt file and the per-step timing table the orchestrator returns"
     ]
   },
   {

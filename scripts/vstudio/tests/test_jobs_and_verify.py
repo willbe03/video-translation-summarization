@@ -79,7 +79,7 @@ def _cue(cue_id, start, end, source, translation, **extra):
 
 def test_verify_passes_a_clean_set():
     final = [_cue(0, 0.0, 2.0, "hello world", "你好世界"), _cue(1, 2.0, 4.0, "goodbye", "再见")]
-    report = verify_translation({}, final, final, None, ass_dialogue_count=2, ass_codec="ass")
+    report = verify_translation({}, final, final, None, subtitle_count=2, subtitle_format="srt")
     assert report["ok"] and not report["failures"]
 
 
@@ -97,10 +97,10 @@ def test_verify_catches_a_comma_that_slipped_through():
     assert any("comma or period" in f for f in report["failures"])
 
 
-def test_verify_catches_an_ass_file_that_lost_a_line():
+def test_verify_catches_a_subtitle_file_that_lost_a_line():
     final = [_cue(0, 0.0, 2.0, "a", "甲"), _cue(1, 2.0, 4.0, "b", "乙")]
-    report = verify_translation({}, final, final, None, ass_dialogue_count=1, ass_codec="ass")
-    assert any("dialogue lines" in f for f in report["failures"])
+    report = verify_translation({}, final, final, None, subtitle_count=1, subtitle_format="ass")
+    assert any("has 1 entries but there are 2 cues" in f for f in report["failures"])
 
 
 def test_a_long_interpolated_run_is_warned_about():
@@ -147,9 +147,19 @@ def test_a_cue_not_timed_like_its_asr_words_fails():
 
 def test_an_ass_line_not_timed_like_its_cue_fails():
     final = [_cue(0, 0.0, 2.0, "a", "甲")]
-    report = verify_translation({}, final, final, None, ass_dialogue_count=1, ass_codec="ass",
-                                ass_times=[("0:00:00.00", "0:00:02.50")])
+    report = verify_translation({}, final, final, None, subtitle_count=1, subtitle_format="ass",
+                                subtitle_times=[("0:00:00.00", "0:00:02.50")])
     assert any("not timed like their cues" in f for f in report["failures"])
+
+
+def test_an_srt_entry_is_checked_against_srt_timestamps():
+    final = [_cue(0, 0.0, 2.0, "a", "甲")]
+    good = verify_translation({}, final, final, None, subtitle_count=1, subtitle_format="srt",
+                              subtitle_times=[("00:00:00,000", "00:00:02,000")])
+    bad = verify_translation({}, final, final, None, subtitle_count=1, subtitle_format="srt",
+                             subtitle_times=[("00:00:00,000", "00:00:02,500")])
+    assert good["ok"]
+    assert any("srt subtitle(s) are not timed" in f for f in bad["failures"])
 
 
 def test_renaming_a_job_rewrites_the_paths_inside_it(tmp_path):

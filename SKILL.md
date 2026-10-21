@@ -1,6 +1,6 @@
 ---
 name: video-subtitles-and-summaries
-description: Transcribes, translates and summarizes local or online video into bilingual ASS subtitles or a cited summary. Use when the user asks to subtitle, translate, transcribe or summarize a video file or a YouTube or Bilibili link.
+description: Transcribes, translates and summarizes local or online video into bilingual SRT or ASS subtitles or a cited summary. Use when the user asks to subtitle, translate, transcribe or summarize a video file or a YouTube or Bilibili link.
 version: 1.0.0
 author: willbe, Hermes Agent
 license: MIT
@@ -48,6 +48,7 @@ changes the output and that you cannot reasonably assume.
 - The source: a URL or a path to a local file.
 - The task: bilingual subtitles, a summary, or both.
 - For subtitles, the target language.
+- For subtitles, the file format: SRT unless the user asks for ASS.
 - Any instruction about tone, localization or terminology.
 - Whether to burn the subtitles into the video, which is off unless asked.
 
@@ -63,6 +64,7 @@ Skill directory: <absolute path of the directory holding this SKILL.md>
 Source: <url or absolute file path>
 Task: <subtitles | summary | both>
 Target language: <language, or "n/a">
+Subtitle format: <srt | ass, or "n/a">
 Style: <tone, localization and terminology instructions, or "none">
 Burn in: <yes | no>
 

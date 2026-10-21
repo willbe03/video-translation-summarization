@@ -18,6 +18,7 @@ from vstudio.glossary import adherence as glossary_adherence
 from vstudio.cues import (
     HANGING_SECONDS,
     ass_timestamp,
+    srt_timestamp,
     internal_silence,
     join_units,
     lexical_weight,
@@ -173,9 +174,9 @@ def verify_translation(
     draft: Sequence[Mapping[str, Any]] | None,
     words: Sequence[Mapping[str, Any]] | None,
     *,
-    ass_dialogue_count: int | None = None,
-    ass_codec: str | None = None,
-    ass_times: Sequence[tuple[str, str]] | None = None,
+    subtitle_count: int | None = None,
+    subtitle_format: str | None = None,
+    subtitle_times: Sequence[tuple[str, str]] | None = None,
     glossary_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
@@ -189,22 +190,23 @@ def verify_translation(
     if ids != list(range(len(final))):
         failures.append("cue ids are not a contiguous run from zero")
 
-    if ass_codec is not None and ass_codec != "ass":
-        failures.append(f"the subtitle file is not an ass stream (ffprobe reports {ass_codec!r})")
-    if ass_dialogue_count is not None:
-        details["ass_dialogue_lines"] = ass_dialogue_count
-        if ass_dialogue_count != len(final):
+    if subtitle_format is not None and subtitle_format not in ("srt", "ass"):
+        failures.append(f"the subtitle file is neither srt nor ass (read as {subtitle_format!r})")
+    if subtitle_count is not None:
+        details["subtitle_entries"] = subtitle_count
+        if subtitle_count != len(final):
             failures.append(
-                f"the ass file has {ass_dialogue_count} dialogue lines but there are {len(final)} cues"
+                f"the {subtitle_format} file has {subtitle_count} entries but there are {len(final)} cues"
             )
-    if ass_times is not None and len(ass_times) == len(final):
+    if subtitle_times is not None and len(subtitle_times) == len(final):
+        stamp = srt_timestamp if subtitle_format == "srt" else ass_timestamp
         mistimed = [
-            c["id"] for c, (start, end) in zip(final, ass_times)
-            if (start, end) != (ass_timestamp(float(c["start"])), ass_timestamp(float(c["end"])))
+            c["id"] for c, (start, end) in zip(final, subtitle_times)
+            if (start, end) != (stamp(float(c["start"])), stamp(float(c["end"])))
         ]
         if mistimed:
             failures.append(
-                f"{len(mistimed)} ass dialogue line(s) are not timed like their cues: {mistimed[:5]}"
+                f"{len(mistimed)} {subtitle_format} subtitle(s) are not timed like their cues: {mistimed[:5]}"
             )
 
     bad_duration = [c["id"] for c in final if float(c["end"]) <= float(c["start"])]

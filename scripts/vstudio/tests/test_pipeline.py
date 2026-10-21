@@ -243,9 +243,20 @@ def test_a_targeted_proofread_replaces_the_uncertainties_of_its_cues(transcribed
     assert sorted((u["id"], u["question"]) for u in stored) == [(1, "new"), (2, "kept")]
 
 
-def test_render_writes_one_dialogue_line_per_cue(transcribed):
+def test_render_writes_one_srt_entry_per_cue_by_default(transcribed):
     job = _translated(transcribed)
     output = pipeline.render(job)
+    assert output.suffix == ".srt"
+    blocks = output.read_text(encoding="utf-8").strip().split("\n\n")
+    assert len(blocks) == 3
+    number, timing, source, translation = blocks[0].splitlines()
+    assert number == "1" and "-->" in timing and "一" in translation
+
+
+def test_render_writes_one_dialogue_line_per_cue_as_ass(transcribed):
+    job = _translated(transcribed)
+    output = pipeline.render(job, subtitle_format="ass")
+    assert output.suffix == ".ass"
     lines = [l for l in output.read_text(encoding="utf-8-sig").splitlines() if l.startswith("Dialogue:")]
     assert len(lines) == 3
     assert "一" in lines[0]

@@ -1,7 +1,7 @@
 # Video subtitles and summaries
 
 An agent skill that transcribes a video or audio file with word-level
-timestamps, then either translates it into bilingual ASS subtitles or writes a
+timestamps, then either translates it into bilingual SRT or ASS subtitles or writes a
 cited summary. The source can be a YouTube or Bilibili link or any file on disk
 that ffmpeg can read.
 

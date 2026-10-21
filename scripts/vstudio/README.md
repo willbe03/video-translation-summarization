@@ -24,7 +24,7 @@ Layout:
 - `pipeline.py` plan and apply for every model stage
 - `prompts.py` what each worker is told
 - `tasks.py` the brief, payload and result handoff
-- `cues.py` words to cues, and the ASS renderer
+- `cues.py` words to cues, and the SRT and ASS renderers
 - `verify.py` mechanical checks on a finished translation
 - `summary.py` coverage checks on a finished summary
 - `agents.py` worker definitions, rendered per harness

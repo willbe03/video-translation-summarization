@@ -181,14 +181,14 @@ their own cues plus a few neighbours marked as context, which they may read but
 never return.
 
 ```bash
-$VS render "$JOB"               # add --burn to write a subtitled video too
+$VS render "$JOB" --format srt  # srt or ass, as the launch message says; add --burn for a subtitled video
 $VS verify "$JOB"
 ```
 
 `verify` exits non-zero on anything mechanically wrong: a moved timestamp, a
 cue that does not run from the earliest start to the latest end of the ASR words
-it covers, an ASS dialogue line not timed like its cue, a comma that survived,
-an ASS file with the wrong number of lines, or a source edit that made a cue
+it covers, a subtitle entry not timed like its cue, a comma that survived,
+a subtitle file with the wrong number of entries, or a source edit that made a cue
 longer than what the speaker said. Cues may
 overlap: where two people talk at once the transcript overlaps, the cues keep
 that timing, and `verify` only counts them in `overlapping_cues`.
@@ -331,6 +331,9 @@ the task count.
 - `--no-page-text` on the translate and proofread plans drops the video page
   description, which is otherwise offered to workers as a spelling reference
   for names.
+- `--format` on `render` picks `srt` (the default) or `ass`. A later `render`
+  without it keeps the job's last format. `--burn` always draws the styled ASS
+  rendering into the video, whichever file format was asked for.
 - `$VS status "$JOB"` says which stage a job reached, which is how you resume
   one you did not start.
 - `$VS doctor --live` spends one short request per cloud provider proving the
