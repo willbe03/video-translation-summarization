@@ -56,6 +56,18 @@ This writes `~/.config/vstudio/config.env`. A real environment variable always
 beats the file, and `--job-root` on `vstudio new` beats both, so a single job
 can be put somewhere else without changing the setting.
 
+One more setting, `--bilibili-en-fallback`, is off by default. On a machine
+outside mainland China, Bilibili can serve a video page without its data, and
+`new` then fails with a hint naming this switch. Turn it on there:
+
+```bash
+uv run --project scripts/vstudio vstudio configure --bilibili-en-fallback on
+```
+
+An empty page is then fetched again from `/en/video/`, whose title,
+description, owner and part names are the original language; only the site's
+interface is English. Streams come from the same API either way.
+
 ## Step 3: the ASR provider, and the one question to ask
 
 Two backends ship. Ask the user which they want, and say what each costs:

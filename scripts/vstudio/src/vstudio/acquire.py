@@ -13,6 +13,7 @@ from typing import Any
 from vstudio.media import (
     AUDIO_ONLY_STREAM,
     audio_streams,
+    canonical_url,
     choose_audio_stream,
     download_audio,
     download_video,
@@ -59,6 +60,8 @@ def acquire(
     audio_only: bool = False,
 ) -> dict[str, Any]:
     described = describe_source(source)
+    if described["kind"] == "url":
+        source = canonical_url(source)
     if described["kind"] == "local":
         media = Path(described["path"])
         probe = probe_media(media)

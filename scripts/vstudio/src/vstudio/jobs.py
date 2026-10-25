@@ -19,6 +19,13 @@ from typing import Any, Iterator
 
 ARTIFACTS_ENV = "VSTUDIO_ARTIFACTS"
 PROVIDER_ENV = "VSTUDIO_ASR_PROVIDER"
+# Off by default; see youget_runner for what it does.
+BILIBILI_EN_FALLBACK_ENV = "VSTUDIO_BILIBILI_EN_FALLBACK"
+
+
+def bilibili_en_fallback_enabled() -> bool:
+    value = os.environ.get(BILIBILI_EN_FALLBACK_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def config_path() -> Path:

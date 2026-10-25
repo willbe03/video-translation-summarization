@@ -79,7 +79,10 @@ in code.
 $VS new "<source>" --title "<title if the user gave one>"
 ```
 
-It prints the job directory, which every later command takes as `$JOB`. A URL
+It prints the job directory, which every later command takes as `$JOB`. A
+Bilibili `/en/video/` link is treated as the `/video/` link for the same video.
+When `new` fails on Bilibili with a hint about `--bilibili-en-fallback`, the
+machine is outside mainland China; see INSTALL.md, then run `new` again. A URL
 is downloaded into the job; a local file is used where it sits and is
 never copied or deleted. When the user supplies a job-specific artifact root,
 add `--job-root "<absolute workspace path>"` to `new`; do not run `configure`

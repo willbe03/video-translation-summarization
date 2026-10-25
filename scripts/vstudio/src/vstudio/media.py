@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from vstudio.jobs import bilibili_en_fallback_enabled
+
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".flv", ".mov", ".m4v"}
 
 
@@ -62,6 +64,19 @@ def you_get_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "vstudio.youget_runner", *args]
 
 
+def canonical_url(url: str) -> str:
+    """The /video/ form of a Bilibili /en/video/ link, the only one you-get accepts.
+
+    Both name the same video, so this changes nothing but the path.
+    """
+    return re.sub(r"(bilibili\.com)/en/video/", r"\1/video/", url, count=1, flags=re.IGNORECASE)
+
+
+def is_bilibili_video_url(url: str) -> bool:
+    """A Bilibili video page or a short link to one, the URLs the /en/ retry covers."""
+    return bool(re.search(r"bilibili\.com/video/|b23\.tv/", url, flags=re.IGNORECASE))
+
+
 def is_youtube_url(url: str) -> bool:
     return bool(re.search(r"(?:youtube\.com|youtu\.be)", url, flags=re.IGNORECASE))
 
@@ -107,7 +122,14 @@ def inspect_url(url: str, cookies: Path | None = None) -> dict[str, Any]:
         if is_youtube_url(url):
             return youtube_fallback_metadata(url, cookies)
         stdout = getattr(exc, "stdout", "") or ""
-        raise RuntimeError(f"you-get could not inspect the video: {stdout[-1000:]}") from exc
+        hint = ""
+        if is_bilibili_video_url(url) and not bilibili_en_fallback_enabled():
+            hint = (
+                " Outside mainland China Bilibili can serve a video page without its data. "
+                "`vstudio configure --bilibili-en-fallback on` retries such a page through "
+                "/en/video/, which carries the same original-language metadata."
+            )
+        raise RuntimeError(f"you-get could not inspect the video: {stdout[-1000:]}{hint}") from exc
 
 
 def stream_height(stream_id: str, info: dict[str, Any]) -> int:

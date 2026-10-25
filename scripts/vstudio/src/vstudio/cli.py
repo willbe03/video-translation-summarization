@@ -58,6 +58,8 @@ def cmd_configure(args: argparse.Namespace) -> int:
         values[jobs.PROVIDER_ENV] = args.provider
     if args.concurrency:
         values[pipeline.CONCURRENCY_ENV] = str(args.concurrency)
+    if args.bilibili_en_fallback:
+        values[jobs.BILIBILI_EN_FALLBACK_ENV] = "1" if args.bilibili_en_fallback == "on" else "0"
     for setting in args.tier or []:
         name, _, spec = setting.partition("=")
         name = name.strip().lower()
@@ -575,6 +577,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", choices=asr.backend_names(), help="default ASR provider")
     p.add_argument("--concurrency", type=int,
                    help="how many workers this harness runs at once, for example 10 on Hermes")
+    p.add_argument("--bilibili-en-fallback", choices=["on", "off"],
+                   help="retry a Bilibili video page that comes back without its data through "
+                        "/en/video/, for machines outside mainland China (default off)")
     p.add_argument("--tier", action="append", metavar="NAME=MODEL/EFFORT",
                    help="what a worker tier means, for example deep=opus/high. Repeatable. "
                         f"Tiers: {', '.join(sorted(agents.TIER_DEFAULTS))}")
