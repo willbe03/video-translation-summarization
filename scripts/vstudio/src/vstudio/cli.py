@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from vstudio import agents, asr, glossary, jobs, pipeline, tasks
+from vstudio import agents, asr, glossary, jobs, pipeline, post, tasks
 from vstudio.acquire import acquire, describe_source
 from vstudio.cues import join_words
 from vstudio.media import cleanup, media_resolution, resolve_ass_ffmpeg, run, take_frame
@@ -69,6 +69,13 @@ def cmd_configure(args: argparse.Namespace) -> int:
             )
         model, effort = agents.parse_tier(spec)
         values[agents.tier_env_name(name)] = f"{model}/{effort}"
+    if args.postprocess:
+        values[post.POSTPROCESS_ENV] = args.postprocess
+    post.check_milliseconds(snap_gap_ms=args.snap_gap_ms, lead_ms=args.lead_ms, lag_ms=args.lag_ms)
+    for env, value in ((post.SNAP_GAP_ENV, args.snap_gap_ms), (post.LEAD_ENV, args.lead_ms),
+                       (post.LAG_ENV, args.lag_ms)):
+        if value is not None:
+            values[env] = str(value)
     path = jobs.write_config(values)
     emit({"config": str(path), "settings": jobs.load_config()})
     return 0
@@ -366,22 +373,78 @@ def cmd_render(args: argparse.Namespace) -> int:
         output = pipeline.render(args.job, subtitle_format=subtitle_format, font=args.font)
     result: dict[str, Any] = {"subtitles": str(output), "subtitle_format": subtitle_format}
     if args.burn:
-        if manifest.get("audio_only"):
-            raise RuntimeError("this job was created with --audio-only, so there is no video to "
-                               "burn subtitles into. Create it again without --audio-only.")
-        media = Path(manifest["media"])
-        burned = args.job / "out" / f"{args.job.name}-subtitled.mp4"
-        styled = output if subtitle_format == "ass" else pipeline.render(
-            args.job, subtitle_format="ass", font=args.font, output=args.job / "cues" / "burn.ass")
-        with jobs.timed(args.job, "burn"):
-            size = media_resolution(media)
-            if not size:
-                raise RuntimeError(f"{media} has no video stream to burn subtitles into")
-            run([resolve_ass_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-                 "-i", str(media), "-vf", f"ass={_filter_path(styled)}",
-                 "-c:a", "copy", str(burned)])
-        result["video"] = str(burned)
+        result["video"] = _burn(args.job, manifest, output, subtitle_format, args.font)
+        result["video_delivered_sha256"] = None
     jobs.update_manifest(args.job, stage="rendered", **result)
+    emit(result)
+    return 0
+
+
+def _burn(job: Path, manifest: dict[str, Any], output: Path, subtitle_format: str,
+          font: str | None, cues: Any = None) -> str:
+    if manifest.get("audio_only"):
+        raise RuntimeError("this job was created with --audio-only, so there is no video to "
+                           "burn subtitles into. Create it again without --audio-only.")
+    media = Path(manifest["media"])
+    burned = job / "out" / f"{job.name}-subtitled.mp4"
+    styled = output if subtitle_format == "ass" else pipeline.render(
+        job, subtitle_format="ass", font=font, output=job / "cues" / "burn.ass", cues=cues)
+    with jobs.timed(job, "burn"):
+        size = media_resolution(media)
+        if not size:
+            raise RuntimeError(f"{media} has no video stream to burn subtitles into")
+        run([resolve_ass_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(media), "-vf", f"ass={_filter_path(styled)}",
+             "-c:a", "copy", str(burned)])
+    return str(burned)
+
+
+def cmd_plan_postcheck(args: argparse.Namespace) -> int:
+    manifest = jobs.read_manifest(args.job)
+    emit(post.plan_postcheck(
+        args.job,
+        source_language=manifest.get("source_language") or "English",
+        target_language=manifest.get("target_language") or "",
+        size=args.size,
+        concurrency=args.concurrency,
+    ))
+    return 0
+
+
+def cmd_apply_postcheck(args: argparse.Namespace) -> int:
+    result = apply_stage(args.job, "postcheck", lambda: post.apply_postcheck(args.job))
+    jobs.update_manifest(args.job, stage="postchecked")
+    emit(result)
+    return 0
+
+
+def cmd_postprocess(args: argparse.Namespace) -> int:
+    manifest = jobs.read_manifest(args.job)
+    subtitle_format = args.format or manifest.get("subtitle_format") or "srt"
+    settings = post.postprocess_settings(
+        enabled=True if args.on else False if args.off else None, snap_gap_ms=args.snap_gap_ms,
+        lead_ms=args.lead_ms, lag_ms=args.lag_ms)
+    with jobs.timed(args.job, "postprocess"):
+        result, delivered = post.postprocess(args.job, settings=settings,
+                                             subtitle_format=subtitle_format, font=args.font)
+    if args.burn:
+        result["video"] = _burn(args.job, manifest, Path(result["subtitles"]), subtitle_format,
+                                args.font, cues=delivered)
+    delivered_sha = post.delivered_fingerprint(args.job)
+    if "video" in result:
+        video = {"video": result["video"], "video_delivered_sha256": delivered_sha}
+    elif manifest.get("video_delivered_sha256") != delivered_sha:
+        video = {"video": None, "video_delivered_sha256": None}
+        stale = Path(manifest["video"]) if manifest.get("video") else None
+        if stale and stale.parent == args.job / "out" and stale.is_file():
+            stale.unlink()
+            result["removed_stale_video"] = str(stale)
+    else:
+        video = {}
+    jobs.update_manifest(args.job, stage="postprocessed", subtitles=result["subtitles"],
+                         subtitle_format=subtitle_format, **video)
+    result["refreshed"] = post.refresh_other_formats(args.job, Path(result["subtitles"]), subtitle_format,
+                                                     delivered, font=args.font)
     emit(result)
     return 0
 
@@ -535,9 +598,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             ("cues", "cues/cues.json"),
             ("translated", "cues/translated.json"),
             ("final", "cues/final.json"),
+            ("checked", "cues/checked.json"),
+            ("delivered", "cues/delivered.json"),
             ("summary", "out/summary.md"),
         )
     }
+    current = post.built_from_current_final(args.job)
+    present["checked"] = present["checked"] and current
+    present["delivered"] = present["delivered"] and current
     emit({"job": str(args.job), "stage": manifest.get("stage"), "title": manifest.get("title"),
           "duration": manifest.get("duration"), "artifacts": present})
     return 0
@@ -556,7 +624,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(handler=handler)
         return p
 
-    def plan_command(name: str, handler, help_text: str) -> argparse.ArgumentParser:
+    def plan_command(name: str, handler, help_text: str,
+                     size_help: str = "rows per worker, overriding the spread") -> argparse.ArgumentParser:
         p = job_command(name, handler, help_text)
         p.add_argument(
             "--concurrency", type=int,
@@ -564,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
                  f"${pipeline.CONCURRENCY_ENV}. The work is spread evenly across "
                  f"that many, within the batch sizes each stage can work well at.",
         )
-        p.add_argument("--size", type=int, help="rows per worker, overriding the spread")
+        p.add_argument("--size", type=int, help=size_help)
         return p
 
     p = sub.add_parser("doctor", help="report what is installed and which ASR providers are ready")
@@ -583,6 +652,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", action="append", metavar="NAME=MODEL/EFFORT",
                    help="what a worker tier means, for example deep=opus/high. Repeatable. "
                         f"Tiers: {', '.join(sorted(agents.TIER_DEFAULTS))}")
+    p.add_argument("--postprocess", choices=["on", "off"],
+                   help="whether postprocess snaps and pads the delivered timing; on by default")
+    p.add_argument("--snap-gap-ms", type=int,
+                   help=f"join neighbours closer than this; default {post.DEFAULT_SNAP_GAP_MS}")
+    p.add_argument("--lead-ms", type=int,
+                   help=f"show each group this early; default {post.DEFAULT_LEAD_MS}")
+    p.add_argument("--lag-ms", type=int,
+                   help=f"keep each group up this long after; default {post.DEFAULT_LAG_MS}")
     p.set_defaults(handler=cmd_configure)
 
     p = sub.add_parser("install-agents", help="write the worker definitions for a harness")
@@ -658,6 +735,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--burn", action="store_true", help="also burn the subtitles into the video")
 
     job_command("verify", cmd_verify, "check the finished translation mechanically")
+
+    plan_command("plan-postcheck", cmd_plan_postcheck,
+                 "after verify: write tasks that resolve overlapping lines",
+                 size_help="overlapping stretches per worker, overriding the spread")
+    job_command("apply-postcheck", cmd_apply_postcheck, "check and apply the overlap fixes")
+    p = job_command("postprocess", cmd_postprocess,
+                    "after post-check: snap and pad the timing and write the delivered file")
+    p.add_argument("--format", choices=pipeline.SUBTITLE_FORMATS,
+                   help="srt or ass; defaults to the job's last render")
+    p.add_argument("--font", help="replace the template's 思源黑体 CN in ass output and burned video")
+    p.add_argument("--burn", action="store_true", help="also burn the delivered subtitles into the video")
+    switch = p.add_mutually_exclusive_group()
+    switch.add_argument("--on", action="store_true", help=f"snap and pad even when ${post.POSTPROCESS_ENV} is off")
+    switch.add_argument("--off", action="store_true", help="deliver the post-checked timing unchanged")
+    p.add_argument("--snap-gap-ms", type=int, help=f"overrides ${post.SNAP_GAP_ENV}")
+    p.add_argument("--lead-ms", type=int, help=f"overrides ${post.LEAD_ENV}")
+    p.add_argument("--lag-ms", type=int, help=f"overrides ${post.LAG_ENV}")
 
     p = plan_command("plan-summarize", cmd_plan_summarize, "write per-part summary tasks")
     p.add_argument("--language")

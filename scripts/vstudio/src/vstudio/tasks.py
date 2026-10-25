@@ -58,6 +58,7 @@ STAGES: dict[str, Stage] = {
     # The only stage that sees every cue at once, so tone and names can be made
     # consistent across stretches no single proofreader saw.
     "cohere": Stage("cohere", "vstudio-worker-deep", "make the whole set consistent"),
+    "postcheck": Stage("postcheck", "vstudio-worker-deep", "resolve overlapping lines"),
     "summarize": Stage("summarize", "vstudio-worker-standard", "note one part", RESULT_MARKDOWN),
     "synthesize": Stage("synthesize", "vstudio-worker-deep", "assemble the summary", RESULT_MARKDOWN),
 }

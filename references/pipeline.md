@@ -6,6 +6,7 @@
 - The rhythm of every stage
 - Steps 1 and 2: acquire and transcribe, both branches
 - Subtitles: glossary and segment, translate, proofread, cohere, render, verify
+- After verify: post-check and post-process
 - Summary: notes, synthesis, coverage
 - Finishing
 - When a stage fails
@@ -41,6 +42,8 @@ Subtitles:
 - [ ] render, verify  read the adjudicate list, rerun cues that need it
 - [ ] plan-cohere    -> dispatch -> apply-cohere
 - [ ] render, verify  again after coherence
+- [ ] plan-postcheck -> dispatch -> apply-postcheck, until nothing overlaps
+- [ ] postprocess    writes the delivered subtitle file
 - [ ] timing, glossary-report  report paths and both tables
 
 Summary:
@@ -94,7 +97,7 @@ the bytes; on Bilibili it also skips the second page extraction the video path
 makes. On a site with no separate audio it falls back to the full video by
 itself, and the output's `audio_only` says which happened. Leave it off when
 subtitles will be burned in or the user may ask about what is on screen: an
-audio-only job has no picture for `frame` or `render --burn`.
+audio-only job has no picture for `frame` or `postprocess --burn`.
 
 It also picks which audio track to transcribe. One track needs no thought. When
 a file carries several, the output lists them all with `audio_track_reason`
@@ -197,7 +200,7 @@ their own cues plus a few neighbours marked as context, which they may read but
 never return.
 
 ```bash
-$VS render "$JOB" --format srt  # srt or ass, as the launch message says; add --burn for a subtitled video
+$VS render "$JOB" --format srt  # srt or ass, as the launch message says; burn in later, on postprocess
 $VS verify "$JOB"
 ```
 
@@ -237,6 +240,43 @@ case, spacing or punctuation. Then run `render` and `verify` again. A proofread
 rerun after this point rebuilds `cues/final.json`, and `apply-proofread` then
 reports `cohere_needs_rerun`, so plan and apply coherence again before
 rendering.
+
+## After verify: post-check and post-process
+
+These two stages run once the last `verify` has passed. They change what
+reaches the screen rather than what was heard, so `verify` checks the render
+before them and is not run again afterwards.
+
+```bash
+$VS plan-postcheck "$JOB"
+$VS apply-postcheck "$JOB"
+$VS postprocess "$JOB"   # add --burn when the launch message says to burn in
+```
+
+`plan-postcheck` finds lines that are on screen at the same time, most often one
+line emitted twice with the same timestamps. Each overlapping stretch goes to a
+deep worker with three neighbours either side as read-only context, and that
+worker may delete a duplicate, merge lines, or change their times. When nothing
+overlaps it prints an empty `dispatch` and you go straight to `postprocess`.
+`apply-postcheck` refuses any answer that leaves a gap in the ids, crosses a
+neighbour, still overlaps, or adds a word to the source that its lines never
+had, and keeps those lines as they were. A merged translation cannot be checked
+that way and is taken as the worker wrote it. Its `next` says what to run: `plan-postcheck` again for what
+still overlaps, or `postprocess`. After three rounds `plan-postcheck` stops and
+names the lines still overlapping; report them and run `postprocess`, which
+leaves them alone.
+
+`postprocess` needs no worker. Neighbours less than 300 ms apart meet at the
+middle of the gap, which joins them into groups, and each group then appears
+100 ms before its first line's speech and stays 200 ms after its last. It
+renders the delivered file in the job's format from `cues/delivered.json`, which
+also keeps the post-checked times as `checked_start` and `checked_end`. The numbers are
+settings, not questions for the user: `vstudio configure --snap-gap-ms
+--lead-ms --lag-ms` changes them and `--postprocess off` turns the timing
+change off. A proofread or coherence rerun after this point rebuilds
+`cues/final.json`, so render, verify, post-check and post-process run again.
+`postprocess` writes over the file `render` wrote, so for another format later
+run `postprocess --format`, not `render`, or the delivered timing is lost.
 
 ## Summary: notes, synthesis, coverage
 
@@ -400,9 +440,11 @@ the task count.
 - `--no-page-text` on the translate and proofread plans drops the video page
   description, which is otherwise offered to workers as a spelling reference
   for names.
-- `--format` on `render` picks `srt` (the default) or `ass`. A later `render`
-  without it keeps the job's last format. `--burn` always draws the styled ASS
-  rendering into the video, whichever file format was asked for. Both formats
+- `--format` on `render` and `postprocess` picks `srt` (the default) or `ass`.
+  A later run without it keeps the job's last format. `--burn` on `postprocess`
+  draws the styled ASS rendering of the delivered timing into the video,
+  whichever file format was asked for; `render --burn` skips post-check and
+  post-process, so do not use it for a delivery. Both formats
   put the translation on top and the source line under it, and break long
   lines themselves because players leave Chinese text unwrapped. ASS output
   fills `templates/movie.ass`, whose 1920-wide canvas keeps the type the same

@@ -71,7 +71,8 @@ _DESCRIPTIONS = {
              "Launched by the video subtitling orchestrator, not directly.",
     "standard": "Translates cues or takes notes on a video from a brief file. "
                 "Launched by the video subtitling orchestrator, not directly.",
-    "deep": "Proofreads subtitles, builds a glossary or assembles a summary from a "
+    "deep": "Proofreads subtitles, resolves overlapping lines, builds a glossary or "
+            "assembles a summary from a "
             "brief file. Launched by the video subtitling orchestrator, not directly.",
 }
 

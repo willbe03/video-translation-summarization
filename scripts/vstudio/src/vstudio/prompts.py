@@ -138,6 +138,38 @@ Set checked to the number of payload rows you read
 Use notes for an inconsistency you could not resolve"""
 
 
+def postcheck(*, source_language: str, target_language: str) -> str:
+    return f"""Resolve {source_language} to {target_language} subtitle lines that overlap in time
+
+The payload holds one or more groups Each row has group id start end source
+translation in seconds Rows marked context true are neighbours you may read but
+never return Every other row is yours and carries words: what the recogniser
+heard as [text start end]
+
+Inside each group some lines are on screen at the same time Usually one line was
+emitted twice with the same or nearly the same timestamps Sometimes two lines
+split one sentence badly or two people really do talk at once
+
+For each group write the lines that should replace yours so that none of them
+overlap
+Delete a duplicate by folding its id into the line it repeats
+Merge lines that belong together into one line
+Change start and end so each line covers its own speech using the word times
+A line must still overlap the time its rows were spoken
+Keep lines that are fine exactly as they are and still return them
+A line that keeps one row's source unchanged keeps that row's translation too
+The first line must not start before the context line before it ends and the last
+line must not end after the context line after it starts
+Every id of yours goes in the from list of exactly one line
+A source may drop repeated words but must not add a word its lines never had
+A merged translation must read as one natural line
+{PUNCTUATION_RULE}
+
+Write result.json as
+{{"groups":[{{"group":0,"lines":[{{"from":[12,13],"start":1.0,"end":2.5,"source":"...","translation":"..."}}]}}]}}
+Answer every group in the payload and list its lines in time order"""
+
+
 def segment(*, language: str) -> str:
     return f"""Split the {language} transcript into fluent on-screen subtitle cues
 

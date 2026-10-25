@@ -119,6 +119,12 @@ def test_a_local_file_goes_all_the_way_to_subtitles(run, media, capsys, tmp_path
     report = run("verify", job)
     assert report["ok"], report["failures"]
     assert run("status", job)["artifacts"]["final"] is True
+
+    assert run("plan-postcheck", job)["dispatch"] == []
+    delivered = run("postprocess", job)
+    assert delivered["subtitle_format"] == "ass" and delivered["lines"] == cue_count
+    assert delivered["settings"] == {"enabled": True, "snap_gap_ms": 300, "lead_ms": 100, "lag_ms": 200}
+    assert run("status", job)["artifacts"]["delivered"] is True
     measured = run("glossary-report", job)
     assert measured["entries"] == 1 and set(measured["adherence"]) == {"translated", "proofread", "final"}
     assert measured["coherence"] == {"translations_changed": 0, "typography_only": 0, "touching_glossary": 0}

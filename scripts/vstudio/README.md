@@ -27,5 +27,6 @@ Layout:
 - `cues.py` words to cues, line wrapping, and the SRT and ASS renderers
 - `templates/movie.ass` the ASS styles the renderer fills
 - `verify.py` mechanical checks on a finished translation
+- `post.py` the stages after verify: overlap fixes and delivered timing
 - `summary.py` coverage checks on a finished summary
 - `agents.py` worker definitions, rendered per harness

@@ -657,14 +657,15 @@ SUBTITLE_FORMATS = ("srt", "ass")
 
 
 def render(job: Path, *, subtitle_format: str = "srt", font: str | None = None,
-           output: Path | None = None) -> Path:
+           output: Path | None = None, cues: Sequence[Mapping[str, Any]] | None = None) -> Path:
     if subtitle_format not in SUBTITLE_FORMATS:
         raise ValueError(f"unknown subtitle format {subtitle_format!r}; choose one of {SUBTITLE_FORMATS}")
     manifest = _read(job, "manifest.json")
-    source = job / "cues" / "final.json"
-    if not source.is_file():
-        source = job / "cues" / "translated.json"
-    cues = json.loads(source.read_text(encoding="utf-8"))
+    if cues is None:
+        source = job / "cues" / "final.json"
+        if not source.is_file():
+            source = job / "cues" / "translated.json"
+        cues = json.loads(source.read_text(encoding="utf-8"))
     output = output or job / "out" / f"{job.name}.{subtitle_format}"
     if subtitle_format == "srt":
         render_bilingual_srt(cues, output)
