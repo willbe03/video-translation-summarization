@@ -455,51 +455,117 @@ def _ass_text(value: str) -> str:
     )
 
 
+ASS_TEMPLATE = Path(__file__).with_name("templates") / "movie.ass"
+ASS_PLAY_WIDTH = 1920
+ASS_TEXT_WIDTH = ASS_PLAY_WIDTH - 2 * 120
+TRANSLATION_COLUMNS = ASS_TEXT_WIDTH * 2 // 62
+SOURCE_COLUMNS = ASS_TEXT_WIDTH * 2 // 42
+_CLOSING = set("!?;:、！？；：」』）》〉】〕”’)]}…~～")
+_OPENING = set("「『（《〈【〔“‘([{")
+
+
+def _wrap_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    for piece in re.findall(r"\s+|[^\s]", value):
+        wide = display_width(piece) == 2
+        if tokens and not piece.isspace() and (
+            piece in _CLOSING
+            or tokens[-1][-1] in _OPENING
+            or (not wide and not tokens[-1].isspace() and display_width(tokens[-1][-1]) == 1)
+        ):
+            tokens[-1] += piece
+        else:
+            tokens.append(piece)
+    return tokens
+
+
+def _fill(tokens: Sequence[str], width: int) -> list[str]:
+    lines: list[str] = []
+    line = ""
+    for token in tokens:
+        if token.isspace():
+            if line:
+                line += " "
+            continue
+        if line and display_width(line.rstrip() + token) > width:
+            lines.append(line.rstrip())
+            line = ""
+        line += token
+    if line.strip():
+        lines.append(line.rstrip())
+    return lines
+
+
+def wrap_line(value: str, columns: int) -> list[str]:
+    """Break a line into the fewest lines that fit, as even in width as possible.
+
+    Renderers break Latin text at spaces but leave a Chinese or Japanese line
+    running off the frame, so breaks go in before rendering. A break falls
+    between words or wide characters, never inside a word or before closing
+    punctuation.
+    """
+    value = " ".join(value.split())
+    if display_width(value) <= columns:
+        return [value] if value else []
+    tokens = _wrap_tokens(value)
+    count = len(_fill(tokens, columns))
+    low = max(display_width(token) for token in tokens if not token.isspace())
+    high = max(low, columns)
+    while low < high:
+        middle = (low + high) // 2
+        if len(_fill(tokens, middle)) <= count:
+            high = middle
+        else:
+            low = middle + 1
+    return _fill(tokens, low)
+
+
+def ass_play_height(frame: tuple[int, int] | None) -> int:
+    if not frame or frame[0] <= 0 or frame[1] <= 0:
+        return 1080
+    return round(ASS_PLAY_WIDTH * frame[1] / frame[0])
+
+
 def render_bilingual_ass(
     segments: Sequence[Mapping[str, Any]],
     output: Path,
     *,
     title: str,
-    source_language: str,
-    target_language: str,
-    font_name: str = "Arial",
+    font_name: str | None = None,
+    frame: tuple[int, int] | None = None,
 ) -> None:
-    header = f"""[Script Info]
-Title: {title}
-ScriptType: v4.00+
-WrapStyle: 0
-ScaledBorderAndShadow: yes
-YCbCr Matrix: TV.709
+    """Fill the movie template, translation on top and source below.
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bilingual,{font_name},42,&H00FFFFFF,&H000000FF,&H00101010,&H90000000,0,0,0,0,100,100,0,0,1,2,1,2,60,60,45,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+    Sizes in the template are 1080p units on a 1920-wide canvas, so the type
+    keeps its share of the frame width at any resolution; the canvas height
+    follows the video's aspect ratio.
+    """
+    header = ASS_TEMPLATE.read_text(encoding="utf-8-sig")
+    header = header.replace("{title}", " ".join(title.split()), 1)
+    header = re.sub(r"^PlayResY: \d+$", f"PlayResY: {ass_play_height(frame)}", header,
+                    count=1, flags=re.M)
+    if font_name:
+        header = re.sub(r"^(Style: [^,]+,)[^,]+,", lambda m: m.group(1) + font_name + ",",
+                        header, flags=re.M)
     lines = [header.rstrip()]
     for segment in segments:
-        source = _ass_text(strip_punctuation(str(segment["source"])))
-        translation = _ass_text(strip_punctuation(str(segment["translation"])))
-        text = f"{source}\\N{translation}"
+        translation = wrap_line(strip_punctuation(str(segment["translation"])), TRANSLATION_COLUMNS)
+        source = wrap_line(strip_punctuation(str(segment["source"])), SOURCE_COLUMNS)
+        text = r"\N".join(_ass_text(line) for line in translation)
+        text += r"\N{\rOriginal}" + r"\N".join(_ass_text(line) for line in source)
         lines.append(
-            f"Dialogue: 0,{ass_timestamp(float(segment['start']))},{ass_timestamp(float(segment['end']))},Bilingual,,0,0,0,,{text}"
+            f"Dialogue: 0,{ass_timestamp(float(segment['start']))},{ass_timestamp(float(segment['end']))},Dialogue,,0,0,0,,{text}"
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
 
 
-def _srt_text(value: str) -> str:
-    return " ".join(value.split())
-
-
 def render_bilingual_srt(segments: Sequence[Mapping[str, Any]], output: Path) -> None:
     blocks = []
     for number, segment in enumerate(segments, start=1):
-        source = _srt_text(strip_punctuation(str(segment["source"])))
-        translation = _srt_text(strip_punctuation(str(segment["translation"])))
+        translation = wrap_line(strip_punctuation(str(segment["translation"])), TRANSLATION_COLUMNS)
+        source = wrap_line(strip_punctuation(str(segment["source"])), SOURCE_COLUMNS)
         timing = f"{srt_timestamp(float(segment['start']))} --> {srt_timestamp(float(segment['end']))}"
-        blocks.append(f"{number}\n{timing}\n{source}\n{translation}")
+        blocks.append("\n".join([str(number), timing, *translation, *source]))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")

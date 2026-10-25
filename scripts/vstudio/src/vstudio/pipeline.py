@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from vstudio import glossary, prompts, tasks
+from vstudio.media import media_resolution
 from vstudio.cues import (
     HANGING_SECONDS,
     apply_translations,
@@ -643,7 +644,7 @@ def apply_cohere(job: Path) -> dict[str, Any]:
 SUBTITLE_FORMATS = ("srt", "ass")
 
 
-def render(job: Path, *, subtitle_format: str = "srt", font: str = "Arial",
+def render(job: Path, *, subtitle_format: str = "srt", font: str | None = None,
            output: Path | None = None) -> Path:
     if subtitle_format not in SUBTITLE_FORMATS:
         raise ValueError(f"unknown subtitle format {subtitle_format!r}; choose one of {SUBTITLE_FORMATS}")
@@ -656,13 +657,13 @@ def render(job: Path, *, subtitle_format: str = "srt", font: str = "Arial",
     if subtitle_format == "srt":
         render_bilingual_srt(cues, output)
         return output
+    media = Path(str(manifest.get("media") or ""))
     render_bilingual_ass(
         cues,
         output,
         title=str(manifest.get("title") or job.name),
-        source_language=str(manifest.get("source_language") or ""),
-        target_language=str(manifest.get("target_language") or ""),
         font_name=font,
+        frame=media_resolution(media) if media.is_file() else None,
     )
     return output
 

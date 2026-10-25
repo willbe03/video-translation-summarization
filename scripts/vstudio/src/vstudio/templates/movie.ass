@@ -1,0 +1,37 @@
+﻿[Script Info]
+; Generic movie template derived from 鸽子样式β2.7.1.
+; Every size, margin and border below is in 1080p units. PlayRes stays 1920x1080 for
+; 4K, 1080p and 720p 16:9 video; the renderer scales the canvas to the frame, so text
+; covers the same share of the picture at every resolution.
+; For other aspect ratios keep PlayResX 1920 and set PlayResY = round(1920 * height / width)
+; (1920x800 and 3840x1600 scope video both get 800), so the type stays tied to the width.
+; libass does not wrap Chinese text on its own, so vstudio render breaks lines with \N.
+; At size 62 a line holds about 27 Chinese characters inside the 120 px side margins.
+Title: {title}
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,思源黑体 CN Normal,62,&H00FFFFFF,&H000000FF,&H634C4B45,&H00000000,0,0,0,0,100,100,0,0,3,1,0,2,120,120,60,1
+Style: Dialogue,思源黑体 CN Normal,62,&H00FFFFFF,&H000000FF,&H634C4B45,&H00000000,0,0,0,0,100,100,0,0,3,1,0,2,120,120,60,1
+Style: Dialogue Top,思源黑体 CN Normal,62,&H00FFFFFF,&H000000FF,&H634C4B45,&H00000000,0,0,0,0,100,100,0,0,3,1,0,8,120,120,60,1
+Style: Original,思源黑体 CN Normal,42,&H00E6E6E6,&H000000FF,&H634C4B45,&H00000000,0,0,0,0,100,100,0,0,3,1,0,2,120,120,60,1
+Style: Sign,思源黑体 CN Medium,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,8,120,120,60,1
+Style: Note,思源黑体 CN Medium,47,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,9,60,60,40,1
+Style: Credits,思源黑体 CN Normal,48,&H20FFFFFF,&HF0000000,&H20000000,&H000F0F0F,-1,0,0,0,100,100,0,0,1,0.8,0,7,100,60,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,Dialogue: 中文对白，底部居中。双语时写成 中文\N{\rOriginal}原文，原文用小一号的 Original 样式。
+Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,Dialogue Top: 底部有画面字或片头字幕时改放顶部。
+Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,Sign: 画面文字翻译，顶部居中，需要时用 \pos 定位到原文旁边。Note: 右上角注释。Credits: 片尾左上角制作人员表。
+Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,————staff——————（片尾，开始时间设为片尾开始，结束时间设为影片结束，左上角逐行列出）
+Comment: 0,0:00:00.00,0:00:00.00,Credits,,0,0,0,,{\fad(600,600)\pos(100,195)}本字幕由{group}制作  仅供交流试看之用
+Comment: 0,0:00:00.00,0:00:00.00,Credits,,0,0,0,,{\fad(600,600)\pos(100,290)}翻译  {translators}
+Comment: 0,0:00:00.00,0:00:00.00,Credits,,0,0,0,,{\fad(600,600)\pos(100,350)}校对  {proofreaders}
+Comment: 0,0:00:00.00,0:00:00.00,Credits,,0,0,0,,{\fad(600,600)\pos(100,410)}时间轴  {timing}

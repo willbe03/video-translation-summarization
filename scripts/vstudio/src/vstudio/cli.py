@@ -639,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = job_command("render", cmd_render, "write the bilingual subtitle file")
     p.add_argument("--format", choices=pipeline.SUBTITLE_FORMATS,
                    help="srt or ass; defaults to the job's last render, else srt")
-    p.add_argument("--font", default="Arial", help="font for ass output and burned video")
+    p.add_argument("--font", help="replace the template's 思源黑体 CN in ass output and burned video")
     p.add_argument("--burn", action="store_true", help="also burn the subtitles into the video")
 
     job_command("verify", cmd_verify, "check the finished translation mechanically")

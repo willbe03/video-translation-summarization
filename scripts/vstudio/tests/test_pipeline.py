@@ -7,11 +7,15 @@ from conftest import words as timed_words
 from vstudio import jobs, pipeline, tasks
 from vstudio import prompts
 from vstudio.cues import (
+    TRANSLATION_COLUMNS,
     build_cues,
+    display_width,
     lexical_weight,
+    render_bilingual_ass,
     repair_boundaries,
     split_at_silences,
     strip_punctuation,
+    wrap_line,
 )
 
 
@@ -249,17 +253,58 @@ def test_render_writes_one_srt_entry_per_cue_by_default(transcribed):
     assert output.suffix == ".srt"
     blocks = output.read_text(encoding="utf-8").strip().split("\n\n")
     assert len(blocks) == 3
-    number, timing, source, translation = blocks[0].splitlines()
-    assert number == "1" and "-->" in timing and "一" in translation
+    number, timing, translation, source = blocks[0].splitlines()
+    assert number == "1" and "-->" in timing and "一" in translation and source == "one two three"
 
 
 def test_render_writes_one_dialogue_line_per_cue_as_ass(transcribed):
     job = _translated(transcribed)
     output = pipeline.render(job, subtitle_format="ass")
     assert output.suffix == ".ass"
-    lines = [l for l in output.read_text(encoding="utf-8-sig").splitlines() if l.startswith("Dialogue:")]
+    text = output.read_text(encoding="utf-8-sig")
+    assert "PlayResX: 1920" in text and "PlayResY: 1080" in text
+    lines = [l for l in text.splitlines() if l.startswith("Dialogue:")]
     assert len(lines) == 3
-    assert "一" in lines[0]
+    translation, source = lines[0].split(",,", 1)[1].split("\\N{\\rOriginal}")
+    assert "一" in translation and source == "one two three"
+
+
+def test_ass_canvas_follows_the_video_aspect_ratio(tmp_path):
+    cue = [{"start": 0, "end": 1, "source": "hi", "translation": "你好"}]
+    for frame, height in [((3840, 2160), 1080), ((1280, 720), 1080),
+                          ((1920, 800), 800), ((3840, 1600), 800), (None, 1080)]:
+        render_bilingual_ass(cue, tmp_path / "out.ass", title="t", frame=frame)
+        assert f"PlayResY: {height}\n" in (tmp_path / "out.ass").read_text(encoding="utf-8-sig")
+
+
+def test_ass_font_override_replaces_every_style_font(tmp_path):
+    cue = [{"start": 0, "end": 1, "source": "hi", "translation": "你好"}]
+    render_bilingual_ass(cue, tmp_path / "out.ass", title="t", font_name="Noto Sans CJK SC")
+    styles = [l for l in (tmp_path / "out.ass").read_text(encoding="utf-8-sig").splitlines()
+              if l.startswith("Style:")]
+    assert styles and all(l.split(",")[1] == "Noto Sans CJK SC" for l in styles)
+
+
+def test_a_long_chinese_line_wraps_into_even_lines_that_fit():
+    line = "这是一句很长的中文对白用来检查在画面宽度不够的时候字幕会不会自动换成两行而不是跑出画面"
+    lines = wrap_line(line, TRANSLATION_COLUMNS)
+    assert "".join(lines) == line and len(lines) == 2
+    assert all(display_width(l) <= TRANSLATION_COLUMNS for l in lines)
+    assert abs(len(lines[0]) - len(lines[1])) <= 1
+
+
+def test_wrapping_never_splits_a_word_or_strands_punctuation():
+    lines = wrap_line("我们在Starbucks门口等了很久很久很久很久很久很久「真的」很久很久很久！然后才走", 30)
+    assert all(display_width(l) <= 30 for l in lines)
+    assert any("Starbucks" in l for l in lines)
+    assert not any(l[0] in "！」" or l[-1] == "「" for l in lines)
+    latin = wrap_line("We're out of time and we have to leave the city before dawn", 30)
+    assert " ".join(latin) == "We're out of time and we have to leave the city before dawn"
+
+
+def test_a_line_that_fits_is_left_alone():
+    assert wrap_line("  我们没有时间了  ", TRANSLATION_COLUMNS) == ["我们没有时间了"]
+    assert wrap_line("", TRANSLATION_COLUMNS) == []
 
 
 def test_summarize_falls_back_to_asr_windows_before_cues_exist(transcribed):

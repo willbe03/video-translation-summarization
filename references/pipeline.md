@@ -333,7 +333,11 @@ the task count.
   for names.
 - `--format` on `render` picks `srt` (the default) or `ass`. A later `render`
   without it keeps the job's last format. `--burn` always draws the styled ASS
-  rendering into the video, whichever file format was asked for.
+  rendering into the video, whichever file format was asked for. Both formats
+  put the translation on top and the source line under it, and break long
+  lines themselves because players leave Chinese text unwrapped. ASS output
+  fills `templates/movie.ass`, whose 1920-wide canvas keeps the type the same
+  share of the frame at 4K, 1080p and 720p. `--font` replaces its 思源黑体 CN.
 - `$VS status "$JOB"` says which stage a job reached, which is how you resume
   one you did not start.
 - `$VS doctor --live` spends one short request per cloud provider proving the
