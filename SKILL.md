@@ -25,7 +25,41 @@ and let it drive. This session's only work is to collect the parameters, launch
 that subagent, and report what comes back.
 
 The job is long and fans out to many workers, and every artifact it produces is
-a file, so none of it needs to pass through this session.
+a file, so none of its intermediate content needs to pass through this session.
+
+## Job scope and delivery
+
+Use the video's spoken language unless a different output language is requested.
+Use the selected audio and ASR detection, not the title or page language, to
+choose it. Resolve conflicting language evidence before dispatching summaries.
+
+Carry the user's style and length preference into both summary stages. Treat
+"concise" as a length override rather than letting the per-minute synthesis
+default expand the answer. Apply the user's writing standard to the final
+report, through a `writing-style` skill where the harness has one.
+Attribute opinions and reported events to the speaker; do not invent details,
+speaker changes, or technical names from titles, metadata, or uncertain ASR.
+
+Preserve the literal source URL and video ID. For a job-specific workspace,
+pass `--job-root` to `new` without changing global settings, and keep task logs
+and temporary files under that job. Workspace selection does not authorize
+cleanup or require indefinite preservation; report cleanup as skipped unless
+it was requested or approved.
+
+Deliver the actual summary, or attach its final file, together with absolute
+output paths. Include measured download plus transcription, summary writing,
+and linking plus cleanup timings when requested. Distinguish per-video-part
+worker timings from whole-job stages and shared download or ASR time; do not
+invent a per-part allocation. Separate failed attempts and recovery overhead
+from useful work, and mark unmeasured durations instead of reporting zero.
+
+Require valid worker results, successful `apply-*` commands, and final coverage
+and link checks before reporting completion. A worker process can exit zero
+while writing an error result. Keep synthesis in a worker during recovery;
+neither a small payload nor a failing reader permits the orchestrator to write
+an unchecked replacement. After a correction, obtain an independent validation
+of grounding, style and links from a reviewer on the deep tier's model before
+declaring the output finished (on Hermes, the route `harness-hermes.md` names).
 
 ## Before the first job
 
@@ -82,7 +116,13 @@ definitions are an enforcement upgrade, not a prerequisite.
 
 While it runs, stay out of its way. Do not transcribe, translate or summarize
 anything yourself, and do not read its intermediate artifacts. When it returns,
-pass on the output paths and the timing table.
+check the returned verification results and final output handle, then relay the
+summary or attach the final file with the output paths, timings and failures.
+A completion notification for a process is not proof that its model stage passed.
+If the orchestrator reports that it patched this skill's own scripts (for
+example a downloader workaround), deliver the summary first, then have an
+independent reviewer on the deep tier's model check that code change before
+treating the patch as kept; do not leave it as an unreviewed note in the report.
 
 The one exception is an explicit instruction from the user to run the pipeline
 in this session. Then follow `references/pipeline.md` yourself, and still send

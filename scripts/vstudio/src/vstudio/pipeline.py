@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from vstudio import glossary, prompts, tasks
 from vstudio.media import media_resolution
+from vstudio.timestamps import FORBIDDEN_HINT, forbidden_citations, iter_timestamps
 from vstudio.cues import (
     HANGING_SECONDS,
     apply_translations,
@@ -33,6 +34,11 @@ from vstudio.cues import (
     strip_punctuation,
     validate_boundaries,
 )
+
+# One wording for every refusal, matching prompts.CITATION_FORMAT.
+_ALLOWED_FORM = ("Only one time in half-width parentheses with ASCII digits is allowed, such "
+                 "as (01:38): no range, no list in one bracket, no words or spaces inside, no "
+                 "other brackets, no hours, no full-width brackets, colon or digits.")
 
 # Every stage has a range its batch may sit in. Below the floor a worker has
 # lost the surrounding speech it needs to judge a break or keep a term
@@ -100,7 +106,13 @@ def _wave_plan(count: int, concurrency: int | None) -> dict[str, Any]:
 # Neighbours shown around a proofreading batch so a fix at a seam can see what
 # it has to agree with.
 PROOFREAD_CONTEXT_CUES = 4
-SUMMARY_SECONDS_PER_TASK = 900
+# Six minutes is about a dozen thirty-second rows. At fifteen minutes a part
+# held thirty rows and the note taker on the cheap route dropped a third of
+# them, leaving a six minute hole the synthesis could not see.
+SUMMARY_SECONDS_PER_TASK = 360
+# A run of uncited transcript rows longer than this inside one part means the
+# note taker skipped a stretch rather than condensing it.
+SUMMARY_MAX_UNCITED_SECONDS = 120.0
 
 
 def _read(job: Path, *parts: str) -> Any:
@@ -744,14 +756,105 @@ def _transcript_segments(job: Path, asr: Mapping[str, Any]) -> list[dict[str, An
     return segments
 
 
-def apply_summarize(job: Path) -> dict[str, Any]:
+def cited_spans(text: str) -> list[tuple[float, float]]:
+    """Every `(MM:SS)` citation in notes, as a one-second (start, end) span.
+
+    The one allowed form is defined in `timestamps.CITATION`; anything else is
+    not counted here and is refused by `forbidden_citations`.
+    """
+    return [(seconds, seconds) for _, seconds in iter_timestamps(text, include_linked=True)]
+
+
+def _forbidden_note(where: str, found: Sequence[str]) -> str:
+    shown = ", ".join(found[:5]) + (f" and {len(found) - 5} more" if len(found) > 5 else "")
+    return f"{where}: {shown}"
+
+
+# Rows further apart than this are separate stretches: the space between them is
+# silence or music with nothing to cite.
+SUMMARY_ROW_GAP_SECONDS = 10.0
+
+
+def uncited_stretches(
+    rows: Sequence[Mapping[str, Any]], cited: Sequence[tuple[float, float]], *, limit: float
+) -> list[tuple[float, float]]:
+    """Runs of consecutive uncited transcript rows holding more than `limit` seconds of speech.
+
+    A citation is written to the second, so a row counts as cited when a cited
+    span overlaps its start rounded down to its end rounded up. A run is measured
+    by the speech in its rows, not the clock time it spans, and a silence longer
+    than SUMMARY_ROW_GAP_SECONDS between rows ends it.
+    """
+    def is_cited(row: Mapping[str, Any]) -> bool:
+        low, high = math.floor(float(row["start"])), math.ceil(float(row["end"]))
+        return any(start <= high and end >= low for start, end in cited)
+
+    gaps: list[tuple[float, float]] = []
+    run: list[Mapping[str, Any]] = []
+
+    def close() -> None:
+        if run and sum(float(r["end"]) - float(r["start"]) for r in run) > limit:
+            gaps.append((float(run[0]["start"]), float(run[-1]["end"])))
+        run.clear()
+
+    for row in rows:
+        if is_cited(row):
+            close()
+            continue
+        if run and float(row["start"]) - float(run[-1]["end"]) > SUMMARY_ROW_GAP_SECONDS:
+            close()
+        run.append(row)
+    close()
+    return gaps
+
+
+def _clock(seconds: float) -> str:
+    whole = int(seconds)
+    return f"{whole // 60:02d}:{whole % 60:02d}"
+
+
+def apply_summarize(job: Path, *, allow_gaps: bool = False) -> dict[str, Any]:
+    """Collect the notes, refusing a part that skipped a stretch of speech.
+
+    `allow_gaps` reports the holes instead of refusing, for the case where a
+    re-dispatched worker left the same stretch uncited because it really is an
+    ad, a song or other speech the summary should not carry. A citation in any
+    form but `(MM:SS)` is always refused; `allow_gaps` does not cover it.
+    """
     notes: list[dict[str, Any]] = []
+    holes: list[str] = []
+    misformatted: list[str] = []
     for index, directory in enumerate(tasks.task_dirs(job, "summarize")):
         meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
         text = tasks.read_text_result(directory)
+        if found := forbidden_citations(text):
+            misformatted.append(_forbidden_note(directory.name, found))
+        payload = directory / tasks.PAYLOAD
+        if payload.is_file():
+            rows = [json.loads(line) for line in payload.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+            cited = cited_spans(text)
+            for start, end in uncited_stretches(rows, cited, limit=SUMMARY_MAX_UNCITED_SECONDS):
+                holes.append(f"{directory.name} ({_clock(start)}-{_clock(end)})")
         notes.append({"part": index, "start": meta["start"], "end": meta["end"], "notes": text})
+    if misformatted:
+        raise RuntimeError(
+            f"notes cite in a form other than (MM:SS): {'; '.join(misformatted)}. "
+            f"{_ALLOWED_FORM} {FORBIDDEN_HINT} Re-dispatch those tasks with the same brief, "
+            f"then apply again."
+        )
+    if holes and not allow_gaps:
+        raise RuntimeError(
+            f"notes skip stretches of the transcript with no citation: {', '.join(holes)}. "
+            f"Re-dispatch those tasks with the same brief, then apply again. If the same "
+            f"stretch comes back uncited and it is an ad, a song or other off-topic speech, "
+            f"apply with --allow-gaps and say so in the report."
+        )
     _write(job, notes, "summary", "notes.json")
-    return {"parts": len(notes)}
+    result: dict[str, Any] = {"parts": len(notes)}
+    if holes:
+        result["uncited_stretches"] = holes
+    return result
 
 
 def plan_synthesize(job: Path, *, language: str, instructions: str = "") -> dict[str, Any]:
@@ -776,6 +879,13 @@ def plan_synthesize(job: Path, *, language: str, instructions: str = "") -> dict
 def apply_synthesize(job: Path) -> Path:
     directory = tasks.task_dirs(job, "synthesize")[0]
     text = tasks.read_text_result(directory)
+    if found := forbidden_citations(text):
+        raise RuntimeError(
+            f"the summary cites in a form other than (MM:SS): "
+            f"{_forbidden_note(str(directory / tasks.RESULT_MARKDOWN), found)}. "
+            f"{_ALLOWED_FORM} {FORBIDDEN_HINT} Re-dispatch the synthesize task with the same "
+            f"brief, or have a worker correct those citations in that file, then apply again."
+        )
     output = job / "out" / "summary.md"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text + "\n", encoding="utf-8")

@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from vstudio.media import (
+    AUDIO_ONLY_STREAM,
     audio_streams,
     choose_audio_stream,
+    download_audio,
     download_video,
+    inspect_url,
     fetch_source_metadata,
     infer_context,
     is_local_source,
@@ -53,6 +56,7 @@ def acquire(
     cookies: Path | None = None,
     max_height: int = 720,
     language: str | None = None,
+    audio_only: bool = False,
 ) -> dict[str, Any]:
     described = describe_source(source)
     if described["kind"] == "local":
@@ -76,7 +80,19 @@ def acquire(
             **_audio_choice(media, language),
         }
 
-    media, metadata, choice = download_video(source, job / "media", cookies=cookies, max_height=max_height)
+    fetched_audio_only = False
+    if audio_only:
+        # One inspection serves both paths, so falling back costs no second lookup.
+        metadata = inspect_url(source, cookies)
+        audio = download_audio(source, job / "media", cookies=cookies, metadata=metadata)
+        if audio is not None:
+            media, choice, fetched_audio_only = audio, AUDIO_ONLY_STREAM, True
+        else:
+            media, metadata, choice = download_video(
+                source, job / "media", cookies=cookies, max_height=max_height, metadata=metadata)
+    else:
+        media, metadata, choice = download_video(
+            source, job / "media", cookies=cookies, max_height=max_height)
     page = fetch_source_metadata(source, cookies)
     title = str(metadata.get("title") or media.stem)
     probe = probe_media(media)
@@ -89,6 +105,7 @@ def acquire(
         "media_borrowed": False,
         "title": title,
         "stream": {"id": choice.stream_id, "height": choice.height, "quality": choice.quality},
+        "audio_only": fetched_audio_only,
         "duration": probe["duration"],
         "has_video": probe["has_video"],
         "width": probe["width"],

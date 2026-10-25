@@ -160,7 +160,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     jobs.write_manifest(job, {"job": str(job), "source": args.source, "stage": "acquiring"})
     with jobs.timed(job, "acquire", source_kind=described["kind"]):
         facts = acquire(args.source, job, cookies=Path(args.cookies) if args.cookies else None,
-                        max_height=args.max_height, language=args.language)
+                        max_height=args.max_height, language=args.language,
+                        audio_only=getattr(args, "audio_only", False))
     manifest = jobs.read_manifest(job)
     manifest.update(facts)
     manifest["stage"] = "acquired"
@@ -172,6 +173,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     report = {"job": str(job), "title": manifest["title"], "duration": manifest.get("duration"),
               "media": manifest["media"], "source_kind": manifest["source_kind"],
               "has_video": manifest.get("has_video"),
+              "audio_only": manifest.get("audio_only", False),
               "audio_track": manifest.get("audio_track"),
               "audio_track_reason": manifest.get("audio_track_reason"),
               "page_description": bool((manifest.get("page") or {}).get("description"))}
@@ -362,6 +364,9 @@ def cmd_render(args: argparse.Namespace) -> int:
         output = pipeline.render(args.job, subtitle_format=subtitle_format, font=args.font)
     result: dict[str, Any] = {"subtitles": str(output), "subtitle_format": subtitle_format}
     if args.burn:
+        if manifest.get("audio_only"):
+            raise RuntimeError("this job was created with --audio-only, so there is no video to "
+                               "burn subtitles into. Create it again without --audio-only.")
         media = Path(manifest["media"])
         burned = args.job / "out" / f"{args.job.name}-subtitled.mp4"
         styled = output if subtitle_format == "ass" else pipeline.render(
@@ -443,7 +448,8 @@ def cmd_plan_summarize(args: argparse.Namespace) -> int:
 
 
 def cmd_apply_summarize(args: argparse.Namespace) -> int:
-    result = apply_stage(args.job, "summarize", lambda: pipeline.apply_summarize(args.job))
+    result = apply_stage(args.job, "summarize", lambda: pipeline.apply_summarize(
+        args.job, allow_gaps=getattr(args, "allow_gaps", False)))
     emit(result)
     return 0
 
@@ -593,6 +599,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-height", type=int, default=720)
     p.add_argument("--language", help="expected spoken language, which picks the audio "
                                       "track on a file that carries several")
+    p.add_argument("--audio-only", action="store_true",
+                   help="summary-only jobs from a URL: fetch just the audio track, falling "
+                        "back to the full video when the site has no separate audio. Leaves "
+                        "no picture for burn-in or `frame`")
     p.set_defaults(handler=cmd_new)
 
     p = job_command("asr", cmd_asr, "transcribe the job's media")
@@ -648,7 +658,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--language")
     p.add_argument("--style")
     p.add_argument("--seconds", type=int, default=pipeline.SUMMARY_SECONDS_PER_TASK)
-    job_command("apply-summarize", cmd_apply_summarize, "collect the per-part notes")
+    p = job_command("apply-summarize", cmd_apply_summarize, "collect the per-part notes")
+    p.add_argument("--allow-gaps", action="store_true",
+                   help="report uncited stretches instead of refusing them; only after a "
+                        "re-dispatch left the same ad or off-topic stretch uncited")
 
     p = job_command("plan-synthesize", cmd_plan_synthesize, "write the assembly task")
     p.add_argument("--language")

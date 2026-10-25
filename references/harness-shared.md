@@ -29,9 +29,9 @@ stage takes as long as its slowest worker only if they run together.
 
 ## Model and effort are set before the call, never in it
 
-No harness here lets you choose either when you launch a worker. Claude Code
-and Codex read both from the agent definition; Hermes has no agent file and
-takes both from global config, the same for every child.
+Claude Code and Codex read both from the agent definition. Hermes has no agent
+file; with model_map routes it takes both from the route named in each task's
+`option`, and without them from global config, the same for every child.
 
 So a plan's `agent` and `effort` are what the stage wants, not a promise about
 what it will get. How close you can come depends on where you are running, and
@@ -42,7 +42,8 @@ your own harness file says which of these you are in:
 | Claude Code, definitions loaded | yes | yes |
 | Claude Code, falling back | yes, passed to the call | no, the session's |
 | Codex, definitions installed | yes | yes |
-| Hermes | no, one setting for all | no, one setting for all |
+| Hermes, model_map routes | yes, by route option | per route, not per tier |
+| Hermes, no routes or one-shot fallback | no, one setting for all | no, one setting for all |
 
 The tiers themselves are settings, not code: `vstudio doctor` prints what is
 in force and `vstudio configure --tier` changes it. You do not need to, and

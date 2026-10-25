@@ -1,5 +1,13 @@
 # Running workers on Hermes
 
+## Contents
+
+- Launching
+- When a worker cannot read its whole payload
+- Which route each worker takes
+- When a worker returns HTTP 401 immediately
+- What this harness enforces
+
 You are in the right file if you have a `delegate_task` tool.
 
 ## Launching
@@ -10,11 +18,18 @@ one call runs the whole stage.
 ```
 delegate_task(tasks=[
   {"goal": "Read the brief at /abs/path/tasks/translate/000/brief.md and do exactly what it says.",
-   "context": "<the full output of `vstudio worker-prompt`>"},
+   "context": "<the full output of `vstudio worker-prompt`>",
+   "option": "fast"},
   {"goal": "Read the brief at /abs/path/tasks/translate/001/brief.md and do exactly what it says.",
-   "context": "<the same worker instructions again>"},
+   "context": "<the same worker instructions again>",
+   "option": "fast"},
 ])
 ```
+
+Every task carries an `option`; see "Which route each worker takes" below.
+The orchestrator is itself a subagent, so it has `delegate_task` only when
+`delegation.max_spawn_depth` is 2 or more. Without it the orchestrator cannot
+launch workers; stop and report that the setting must be raised.
 
 Each child sees only its own `context`, so the instructions are repeated in
 every task. That is the documented behaviour, not waste.
@@ -35,41 +50,87 @@ After that a plan either fits in one call or tells you how many to send per
 group. A ninety minute video plans ten translation tasks of 142 cues rather
 than thirty six of forty, which also reads better across cue boundaries.
 
-## Model and effort are one setting for every worker
+## When a worker cannot read its whole payload
 
-`delegate_task` takes a goal, a context and an output schema. It takes no model
-and no reasoning effort, and there is no agent file here to put them in. Both
-come from `delegation.model` and `delegation.reasoning_effort` in config, which
-apply to every child equally, so the tiering in a plan cannot be honoured: the
-cheap segmentation worker and the proofreader run identically.
+When a worker reports a truncated read, do not infer completeness from the
+payload's small byte count: a reader can shorten individual long JSONL lines.
+Inspect the reported read boundaries without dumping the transcript into the
+orchestrator. Repair and verify the worker's input/read path before retrying,
+and retain the worker-only synthesis boundary. Do not describe an attempted
+input adaptation as a working recovery until a worker and `apply-*` accept it.
 
-Ignore the `agent` and `effort` fields in the plan output. Nothing you can pass
-will change either, and there is no fallback that recovers them the way there
-is on Claude Code. What survives is the wording, since the segmentation brief
-tells the worker the pass is mechanical, which is why that line exists.
+### When a synthesis worker keeps failing to read its payload
 
-Pick the config once for the whole job rather than per stage. Proofreading,
-glossary and coherence are the stages that decide what a person meant, so a
-setting good enough for them is the one to use, and segmentation costs more
-than it should as a consequence. Say so in the final report, because the timing
-table will show segmentation taking longer than its share elsewhere.
+A worker that reads `payload.jsonl` through its own `read_file` can fail when
+the plan writes one part's notes as a single long JSONL line: read_file
+truncates a long line on a line boundary, so the worker never sees the whole
+notes block and the stage produces nothing (or the orchestrator bypasses it by
+hand-writing the summary, which voids the worker contract). Do not bypass the
+worker. Regenerate the plan, then programmatically restructure the job-local
+payload into short rows, one notes paragraph per row, each row keeping its
+`part`, `start`, `end`, ordered by part then source order for chronology. This
+is a harness adapter, not a global config change: rewrite only that task's
+`payload.jsonl` and its `brief.md` so the brief describes the paragraph rows
+and their ordering (e.g. "14 rows, one notes paragraph per row, part 0 then
+part 1, in source order"). Then re-dispatch one worker for the regenerated
+brief. Verification: run the stage's apply command and check-summary; these
+validate accepted output and timestamp coverage, not factual accuracy or the
+worker's complete compliance. After a review-driven correction, run the reviewer
+again against the exact final artifact and save a new verdict. Retain the earlier
+failed review as provenance; a corrected draft is not evidence of a passing
+independent review. Count prose words after removing Markdown citation tokens,
+and label raw whitespace-token counts separately.
+
+## Which route each worker takes
+
+With the `advanced-delegation` plugin in `model_map` mode, each `delegate_task`
+task takes an `option` naming a configured route. Read the plan's `agent` field
+and put the matching option on every task of the stage. The route names below
+are the ones this skill is maintained with; on another install, use the cheap
+and the stronger route its `option` enum offers.
+
+- `vstudio-worker-light` (segment) and `vstudio-worker-standard` (translate,
+  summarize notes): `"option": "fast"`, the cheap route.
+- `vstudio-worker-deep` (proofread, glossary, cohere, synthesize):
+  `"option": "review-claude"`, the stronger route.
+
+The route decides model and effort. Ignore the plan's `model` and `effort`
+fields, which name Claude Code models, and never put a provider or model id in
+the call. Without `model_map` routes, every child takes `delegation.model` and
+`delegation.reasoning_effort` from global config at once, so the tiers
+cannot be honoured; do not spend effort trying, and say in the report that
+every stage ran on one model. If the option you need is missing from the
+`option` enum, stop and report it rather than letting the task fall to the
+default route: a deep stage on the cheap route is the failure that costs
+quality. Each result carries a `route` field; report the routes each stage
+actually ran on.
+
+The independent review after a correction is not a plan stage, but it follows
+the same rule: dispatch it with `"option": "review-claude"`. A task with no
+`option` runs on the default `fast` route, which does not count as the
+independent review; check the result's `route` before reporting a verdict.
+Editing citation times in a worker result is a content correction, not a
+formatting fix, so it needs that review. Send the correction to a
+`review-claude` worker rather than editing it yourself, and have it set each
+time from the word timings in `asr/words.json`: `transcript.md` can hold one
+timestamp block for the whole video, and times estimated from it drift by a
+minute or more.
 
 ## When a worker returns HTTP 401 immediately
 
 Every child failing at once, before doing any work, is a credentials problem
-rather than anything about the task. Hermes resolves a child's credentials from
-`delegation` in `config.yaml`, and when `delegation.api_key` is empty it
-inherits the parent session's key. If `delegation.model` points at a different
-provider from the one the main session is using, that key is then sent to the
-wrong endpoint and every worker is refused.
+rather than anything about the task. In model_map mode each task's route names
+a provider and the child loads that provider's own credentials;
+`delegation.model` and `delegation.api_key` are not used. Check what the
+failing route points at with `hermes delegation config --show`, and whether
+that provider is authenticated (for the Claude subscription route, whether
+`claude` is logged in).
 
-You cannot fix this mid-job; the setting is not reloadable from inside a
-session. Either have the user set `delegation.api_key` for the provider
-`delegation.model` names, or point `delegation.model` at the provider the
-session is already authenticated against. As a way through in the meantime,
-run each brief in its own one-shot hermes process, which authenticates the
-same way the main session does. Say in the final report that the stage ran
-serially, because the timing table will look nothing like a parallel one.
+You cannot fix credentials mid-job. Have the user repair the route's provider.
+As a way through in the meantime, run each brief in its own one-shot hermes
+process, which authenticates the same way the main session does. Say in the
+final report that the stage ran serially and on the main model, because the
+timing table will look nothing like a parallel one.
 
 ## What this harness enforces
 

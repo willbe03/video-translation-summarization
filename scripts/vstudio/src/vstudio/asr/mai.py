@@ -96,11 +96,23 @@ class _MaiError(RuntimeError):
 # Audio is uploaded as 16 kHz mono PCM, 32 KB per second of speech, so an hour
 # is roughly 110 MB going up before any transcribing starts. A fixed timeout
 # was fine for a five minute clip and failed a long one on a slow link.
-BASE_TIMEOUT_SECONDS = 120
-# 1 MB per second is a pessimistic 8 Mbit upload, which is what makes this a
-# ceiling on waiting rather than an estimate of how long it will take.
-SECONDS_PER_MEGABYTE = 1.0
+# The socket timeout bounds idle time, not the whole request: an upload that
+# keeps sending never trips it, and the long idle stretch is the server
+# transcribing after the upload, which grows with the audio's length. A twenty
+# minute track came back in under eighteen seconds including the upload, so
+# about 0.015 s of idle per second of audio; 0.03 s doubles that, on top of a
+# fixed minute. The size term keeps the old allowance for a slow link.
+# A stalled twenty minute request used to sit out about 150 s and then fail the
+# stage; now it waits about 95 s and is retried once. A two hour file gets about
+# 275 s, close to the old allowance.
+BASE_TIMEOUT_SECONDS = 60
+SECONDS_PER_MEGABYTE = 0.5
+SECONDS_PER_AUDIO_SECOND = 0.03
 MAX_TIMEOUT_SECONDS = 3600
+# A timed-out POST has to be uploaded and billed again, so a stall is retried
+# once; a second stall is reported rather than repeated.
+MAX_TIMEOUT_RETRIES = 1
+_RETRY_STATUS = (429, 502, 503, 504)
 
 
 # The endpoint reads the declared type, so a copied Opus track announced as
@@ -115,10 +127,12 @@ def content_type(audio: Path) -> str:
     return _CONTENT_TYPES.get(audio.suffix.lower(), "application/octet-stream")
 
 
-def request_timeout(size_bytes: int) -> int:
-    """How long to wait for one request, scaled by what has to be uploaded."""
+def request_timeout(size_bytes: int, duration_seconds: float | None = None) -> int:
+    """Idle time to allow one request: the larger of the upload and transcription terms."""
     megabytes = size_bytes / (1024 * 1024)
-    return int(min(MAX_TIMEOUT_SECONDS, BASE_TIMEOUT_SECONDS + megabytes * SECONDS_PER_MEGABYTE))
+    by_size = BASE_TIMEOUT_SECONDS + megabytes * SECONDS_PER_MEGABYTE
+    by_audio = BASE_TIMEOUT_SECONDS + (duration_seconds or 0.0) * SECONDS_PER_AUDIO_SECOND
+    return int(min(MAX_TIMEOUT_SECONDS, max(by_size, by_audio)))
 
 
 def transcribe_audio(
@@ -128,17 +142,23 @@ def transcribe_audio(
     locale: str | None = None,
     timeout_s: int | None = None,
     max_retries: int = 3,
+    duration_s: float | None = None,
 ) -> dict[str, Any]:
     """Transcribe a single audio file and return the full MAI JSON response.
 
-    Retries transient HTTP 429 (throttle) and 503 (busy) responses with
-    exponential backoff so parallel chunk transcription stays robust.
+    Retries transient HTTP 429 (throttle) and 503 (busy) responses, connection
+    failures, and requests that time out waiting for a response, with
+    exponential backoff so parallel chunk transcription stays robust. A read
+    timeout surfaces as TimeoutError rather than URLError, so it needs its own
+    clause or one stalled request fails the whole stage.
     """
+    import http.client
+    import ssl
     import time
 
     endpoint = mai_endpoint()
     if timeout_s is None:
-        timeout_s = request_timeout(audio.stat().st_size)
+        timeout_s = request_timeout(audio.stat().st_size, duration_s)
     key = mai_api_key()
     boundary = "--hermes-mai-boundary-" + os.urandom(8).hex()
     definition = json.dumps(_definition(phrases=phrases, locale=locale), ensure_ascii=False)
@@ -161,6 +181,7 @@ def transcribe_audio(
     quoted_endpoint = f"{endpoint}?api-version={urllib.parse.quote(API_VERSION)}"
 
     last_error: Exception | None = None
+    timeouts = 0
     for attempt in range(max_retries + 1):
         request = urllib.request.Request(
             quoted_endpoint,
@@ -176,7 +197,7 @@ def transcribe_audio(
                 raw = response.read()
             break
         except urllib.error.HTTPError as exc:
-            if exc.code in (429, 503) and attempt < max_retries:
+            if exc.code in _RETRY_STATUS and attempt < max_retries:
                 last_error = exc
                 time.sleep(2 ** attempt)
                 continue
@@ -188,6 +209,25 @@ def transcribe_audio(
                 time.sleep(2 ** attempt)
                 continue
             raise _MaiError(f"MAI-Transcribe request failed: {exc}") from exc
+        except TimeoutError as exc:
+            last_error = exc
+            timeouts += 1
+            if attempt < max_retries and timeouts <= MAX_TIMEOUT_RETRIES:
+                time.sleep(2 ** attempt)
+                continue
+            raise _MaiError(
+                f"MAI-Transcribe timed out {timeouts} time(s) waiting {timeout_s}s for a "
+                f"response ({attempt + 1} attempt(s) in all): {exc}"
+            ) from exc
+        except (ConnectionError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise _MaiError(
+                f"MAI-Transcribe request failed after {attempt + 1} attempts: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     else:
         raise _MaiError(f"MAI-Transcribe throttled: {last_error}")
 
@@ -342,6 +382,7 @@ class MaiBackend:
             window.path,
             phrases=_phrases_from_context(context),
             locale=language,
+            duration_s=window.duration,
         )
         words = [
             Word(w["text"], w["start_time"], w["end_time"]) for w in extract_words(payload)

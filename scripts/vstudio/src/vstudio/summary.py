@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from vstudio.timestamps import iter_timestamps
+from vstudio.timestamps import FORBIDDEN_HINT, forbidden_citations, iter_timestamps
 
 # Below this fraction of the video, the latest cited moment suggests the writer
 # stopped reading partway rather than that the tail was uninteresting.
@@ -61,6 +61,15 @@ def check_summary(
         ]
         details["timestamps_cited"] = len(cited)
         details["latest_citation"] = max(cited) if cited else None
+        # A hand edit after apply-synthesize can bring a forbidden form back.
+        misformatted = forbidden_citations(summary_markdown)
+        if misformatted:
+            shown = ", ".join(misformatted[:5])
+            more = f" and {len(misformatted) - 5} more" if len(misformatted) > 5 else ""
+            failures.append(
+                f"summary cites {len(misformatted)} time(s) in a form other than (MM:SS), "
+                f"which are neither counted nor linked: {shown}{more}. {FORBIDDEN_HINT}"
+            )
         if duration:
             beyond = [s for s in cited if s > float(duration) + chunk]
             if beyond:

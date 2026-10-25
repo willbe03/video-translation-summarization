@@ -86,6 +86,14 @@ def test_a_summary_worker_must_cite_timestamps():
     assert "Every paragraph needs at least one citation" in body
 
 
+def test_both_summary_stages_demand_the_single_citation_form():
+    for body in (prompts.summarize(language="Chinese"),
+                 prompts.synthesize(title="t", language="Chinese")):
+        assert prompts.CITATION_FORMAT in body
+        assert "(01:38) (02:09)" in body and "never write a range" in body
+    assert "range citation" not in prompts.summarize(language="English")
+
+
 def test_a_longer_video_asks_for_a_longer_summary():
     assert prompts.summary_word_target(60) == prompts.SUMMARY_MIN_WORDS
     assert prompts.summary_word_target(20 * 60) == 1000

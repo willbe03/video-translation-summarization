@@ -22,9 +22,10 @@ uv run --project scripts/vstudio vstudio <command> ...
 
 Below, `$VS <command>` is shorthand for that line and `$JOB` for the job
 directory. Write both out in full each time rather than storing them in
-variables: a shell variable does not survive from one tool call to the next,
-and zsh does not split `$VS` into words. Every command prints JSON on stdout.
-Read that JSON; do not go looking in the job directory for the same answer.
+variables: a shell variable does not reliably survive from one tool call to the
+next, and zsh does not split `$VS` into words. Most commands print JSON on stdout;
+`timing` prints a text table. Read the command output instead of opening artifacts
+for the same answer. Keep any redirected command logs inside the job directory.
 
 Copy the checklist for your branch and tick items off as you go. A long job is
 easy to lose your place in, and the step most often skipped is the last one.
@@ -80,7 +81,17 @@ $VS new "<source>" --title "<title if the user gave one>"
 
 It prints the job directory, which every later command takes as `$JOB`. A URL
 is downloaded into the job; a local file is used where it sits and is
-never copied or deleted.
+never copied or deleted. When the user supplies a job-specific artifact root,
+add `--job-root "<absolute workspace path>"` to `new`; do not run `configure`
+to change the global artifact setting.
+
+For a summary-only job from a URL, add `--audio-only`. It fetches just the
+audio track (Bilibili's DASH audio, YouTube's best audio format), about half
+the bytes; on Bilibili it also skips the second page extraction the video path
+makes. On a site with no separate audio it falls back to the full video by
+itself, and the output's `audio_only` says which happened. Leave it off when
+subtitles will be burned in or the user may ask about what is on screen: an
+audio-only job has no picture for `frame` or `render --burn`.
 
 It also picks which audio track to transcribe. One track needs no thought. When
 a file carries several, the output lists them all with `audio_track_reason`
@@ -106,7 +117,9 @@ turn to wait ends the job. Never start it with `&` or `nohup`; your harness file
 says how to wait on a long command.
 
 If the source language matters and the user told you, pass a locale:
-`--language en-US`. Otherwise let it detect.
+`--language en-US`. Otherwise let it detect. Base the summary language on the
+selected audio and detected speech, not the title or description. A translated
+video page does not establish the language spoken in the recording.
 
 What goes to the endpoint is the chosen track. A track already in a codec the
 endpoint takes, and under 192 kbps, is copied rather than re-encoded. Anything
@@ -227,7 +240,7 @@ rendering.
 ```bash
 $VS plan-summarize "$JOB" --style "<instructions>"
 $VS apply-summarize "$JOB"
-$VS plan-synthesize "$JOB"
+$VS plan-synthesize "$JOB" --style "<instructions>"
 $VS apply-synthesize "$JOB"
 $VS check-summary "$JOB"
 ```
@@ -236,25 +249,61 @@ Pass `--language` to `plan-summarize` when the summary should be in a language
 other than the one spoken. `plan-synthesize` then writes in the same language
 unless it is given its own `--language`.
 
-The video is split into stretches of about fifteen minutes and one worker takes
-notes on each, in parallel. A second stage assembles them into one summary,
-which is where the chronology and the repetition across stretches get sorted
-out. `apply-synthesize` turns the cited timestamps into deep links when the
-source was a URL.
+The video is split into stretches of about six minutes and one worker takes
+notes on each, in parallel. The whole summary branch allows one citation form
+only, in the notes and in the summary: a single time in half-width parentheses
+with ASCII digits, `(01:38)`, minutes past 59 on a long video, `(75:20)`, and
+several moments written as separate citations, `(01:38) (02:09)`. No ranges,
+no lists in one bracket, no words or spaces inside the bracket, no other
+brackets, no HH:MM:SS, no full-width `（ ）`, `：` or digits. A ratio, score or
+time of day that is not a citation goes outside brackets, since a bracketed
+clock-like time is refused. Every command reads only that form: the coverage
+checks, the link pass and `check-summary`. Do not add lenient parsing of other
+forms back into any of them: the user chose a strict, prompt-enforced format
+over guessing, so a worker that strays is refused and re-dispatched rather
+than interpreted. Summaries written before this rule (full-width or range
+citations) now fail `check-summary`; that is expected.
 
-The summary's length follows the video's: the assembly brief asks for about 50
-words per minute of video, never under 200, and `plan-synthesize` reports the
-figure as `target_words`. A length the user asked for goes in `--style` on
-`plan-synthesize` and overrides it.
+`apply-summarize` refuses a part that cites in any other form, quoting the
+offending tokens; `--allow-gaps` does not cover this. It also rejects a part
+whose notes leave more than two minutes of transcript rows uncited, naming the
+task and the stretch, e.g. `001 (08:46-10:58)`. Either way, re-dispatch just
+that task with the same brief and apply again; do not raise `--seconds` to get
+past it. If the re-run leaves the same stretch uncited and it is an ad, a song
+or other off-topic speech, run `apply-summarize --allow-gaps`, which records
+the stretches in its output instead of refusing, and say so in the report.
+
+A second stage assembles the notes into one summary, which is where the
+chronology and the repetition across stretches get sorted out.
+`apply-synthesize` refuses a summary that cites in any other form, before
+writing `out/summary.md`; re-dispatch the synthesize task or have a deep-tier
+worker correct those citations in its `result.md`, then apply again.
+Otherwise it turns every citation into a deep link when the source was a URL.
+
+Without a length override, the assembly brief asks for about 50 words per minute
+of video, never under 200, and `plan-synthesize` reports `target_words`. Pass the
+user's instructions to `--style` on both summary plans. When the user asks for a
+concise summary without a word count, choose a short target appropriate to the
+content and state it in synthesis style; this overrides the default length.
+Inspect the generated brief before dispatch to confirm the language and style
+survived planning, without opening its transcript payload.
 
 `check-summary` fails when the summary cites a moment past the end of the video
-and warns when the last citation lands in the first three quarters, which
-almost always means only the opening was covered. It also warns when speech
+or holds a citation in any form but `(MM:SS)` (which a hand edit after
+`apply-synthesize` can bring back), and warns when the last citation lands in
+the first three quarters, which almost always means only the opening was
+covered. It also warns when speech
 ends well before the video does. That is normal for credits or music and is
 also what a transcript that stopped early looks like, so report the gap with
 what you believe caused it. On that warning, rerun
 `plan-summarize` for the parts that were thin rather than regenerating all of
 it.
+
+After `apply-synthesize`, verify that every deep link retains the literal
+source ID with an in-range seek time, and that `citation_problems` is empty.
+Treat `check-summary` as a
+coverage gate, not a grounding or writing-style review; have an independent
+reviewer check claims, uncertain names, attribution and concision as well.
 
 If the user wants both branches, run the subtitle steps first. The summary
 stage uses the cues when they exist, which gives it better sentence boundaries
@@ -283,10 +332,21 @@ costs what its slowest worker costs. Each row also carries `first_done` and
 `last_done` and `seconds` is time spent launching and noticing rather than
 working, which is why every worker of a stage is launched in one message.
 
-Report the output paths, both tables, and anything that failed or needed a
-rerun. If the user asked for a summary and the media was downloaded, offer
-`$VS cleanup "$JOB"`, which deletes downloaded media and scratch files and
-refuses to touch a file the user supplied.
+Report the actual summary or attach its final file, the absolute output paths,
+the applicable timing and glossary tables, and anything that failed or needed a
+rerun. For requested grouped timings, compute download plus ASR from recorded
+stages, measure synthesis/review and linking/checking separately, and keep
+failed attempts and launch/wait overhead visible. Measure cleanup only when
+it runs; otherwise label it skipped. Do not allocate shared acquisition or ASR
+time to individual video parts without measurements, and do not present a
+dispatch interval containing failed workers as pure writing time.
+
+If the media was downloaded and cleanup was requested or approved, run
+`$VS cleanup "$JOB"`; it deletes downloaded media and scratch files and refuses
+to touch a file the user supplied. Otherwise retain the media and give this
+command as the cleanup option. A custom workspace path alone does not authorize
+deleting files. Render timing rows as labeled lines or bullets in Discord,
+where Markdown tables are not supported.
 
 To answer a question about something on screen, grab a still:
 `$VS frame "$JOB" --at 00:12:30`.
@@ -298,7 +358,13 @@ the same brief path; the brief and payload are still there and re-running the
 plan command would throw away every other worker's answer.
 
 A worker that reports it could not do the work writes `{"error": ...}` to its
-result file. Read that one file, fix what it names if you can, and re-dispatch.
+result file. Read that one error file, fix what it names if you can, and
+re-dispatch. Check `apply-*` even when the worker process exits zero; an error
+result is still a failed stage. If the same error recurs on an unchanged retry,
+stop blind re-dispatching and diagnose the named prerequisite. Preserve valid
+part notes and resume at the failed stage. Do not read the full payload and
+perform synthesis yourself as a workaround; completion still requires a
+worker-produced result accepted by the apply and verification commands.
 
 If `$VS new` fails on a URL, the download was blocked, not the skill. Say so
 and ask the user for a file instead of retrying variations.

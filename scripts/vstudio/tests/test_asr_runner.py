@@ -301,6 +301,104 @@ def test_the_request_timeout_grows_with_what_has_to_be_uploaded():
 
     assert request_timeout(11 * 1024 * 1024) < request_timeout(165 * 1024 * 1024)
     assert request_timeout(10**12) <= 3600
+    # A twenty minute Opus track (about 27 MB) no longer waits 150 s on a stall.
+    assert request_timeout(27 * 1024 * 1024, 1222) < 100
+    # The idle stretch is the server transcribing, so long audio keeps a long allowance.
+    assert request_timeout(170 * 1024 * 1024, 7200) >= 270
+    assert request_timeout(27 * 1024 * 1024, 7200) > request_timeout(27 * 1024 * 1024, 1222)
+
+
+def _mai_env(monkeypatch, tmp_path):
+    import vstudio.asr.mai as mai
+
+    monkeypatch.setenv("MAI_SPEECH_KEY", "test-key")
+    monkeypatch.setenv("MAI_SPEECH_REGION", "westus")
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    audio = tmp_path / "audio.ogg"
+    audio.write_bytes(b"\0" * 1024)
+    return mai, audio
+
+
+class _Response:
+    def __init__(self, payload):
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_request_that_times_out_waiting_for_a_response_is_retried(tmp_path, monkeypatch):
+    """A read timeout is TimeoutError, not URLError; it used to fail the stage outright."""
+    mai, audio = _mai_env(monkeypatch, tmp_path)
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        return _Response({"combinedPhrases": [{"text": "ok"}]})
+
+    monkeypatch.setattr(mai.urllib.request, "urlopen", urlopen)
+    data = mai.transcribe_audio(audio, timeout_s=5)
+    assert data["combinedPhrases"][0]["text"] == "ok"
+    assert calls == [5, 5]
+
+
+def test_a_second_stall_is_reported_rather_than_uploaded_again(tmp_path, monkeypatch):
+    """A timed-out POST is re-uploaded and billed, so a stall is retried once only."""
+    mai, audio = _mai_env(monkeypatch, tmp_path)
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(timeout)
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(mai.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RuntimeError, match="timed out 2 time"):
+        mai.transcribe_audio(audio, timeout_s=5, max_retries=3)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("failure", [
+    lambda: __import__("urllib.error").error.URLError("connection refused"),
+    lambda: ConnectionResetError("reset by peer"),
+    lambda: __import__("http.client").client.IncompleteRead(b"partial"),
+    lambda: __import__("urllib.error").error.HTTPError("u", 502, "Bad Gateway", {}, None),
+])
+def test_transient_failures_are_retried_with_backoff(tmp_path, monkeypatch, failure):
+    mai, audio = _mai_env(monkeypatch, tmp_path)
+    sleeps, calls = [], []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    def urlopen(request, timeout):
+        calls.append(timeout)
+        if len(calls) < 3:
+            raise failure()
+        return _Response({"combinedPhrases": [{"text": "ok"}]})
+
+    monkeypatch.setattr(mai.urllib.request, "urlopen", urlopen)
+    assert mai.transcribe_audio(audio, timeout_s=5)["combinedPhrases"][0]["text"] == "ok"
+    assert sleeps == [1, 2]
+
+
+def test_a_persistent_connection_failure_gives_up_after_every_attempt(tmp_path, monkeypatch):
+    mai, audio = _mai_env(monkeypatch, tmp_path)
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(timeout)
+        raise ConnectionResetError("reset by peer")
+
+    monkeypatch.setattr(mai.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        mai.transcribe_audio(audio, timeout_s=5, max_retries=2)
+    assert len(calls) == 3
 
 
 def test_a_missing_encoder_falls_through_the_chain(tmp_path, monkeypatch):

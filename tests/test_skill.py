@@ -321,8 +321,9 @@ def test_every_harness_file_says_what_it_can_do_about_model_and_effort():
 
 
 def test_the_harness_that_can_honour_neither_says_so_plainly():
-    """Hermes takes both from global config for every child at once, so an
-    orchestrator there must not spend effort trying to tier its workers."""
+    """Without model_map routes Hermes takes both from global config for every
+    child at once, so an orchestrator there must not spend effort trying to
+    tier its workers."""
     text = (SKILL / "references" / "harness-hermes.md").read_text(encoding="utf-8")
     assert "delegation.reasoning_effort" in text and "delegation.model" in text
     assert "cannot be honoured" in text

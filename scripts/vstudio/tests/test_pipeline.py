@@ -314,6 +314,107 @@ def test_summarize_falls_back_to_asr_windows_before_cues_exist(transcribed):
     assert payload[0]["text"].startswith("one two three")
 
 
+def _rows(count, seconds=30.0):
+    return [{"start": i * seconds + 0.4, "end": (i + 1) * seconds - 0.2, "text": f"row {i}"}
+            for i in range(count)]
+
+
+def test_notes_that_skip_a_stretch_are_found():
+    """The 15 minute part that lost 08:46-15:06: rows past 08:46 went uncited."""
+    rows = _rows(30)
+    notes = " ".join(f"point ({i // 2:02d}:{(i % 2) * 30 + 1:02d})" for i in range(18))
+    gaps = pipeline.uncited_stretches(rows, pipeline.cited_spans(notes), limit=120)
+    assert len(gaps) == 1
+    assert gaps[0][0] == pytest.approx(540.4) and gaps[0][1] == pytest.approx(899.8)
+
+
+def test_condensed_notes_pass():
+    rows = _rows(12)
+    # One citation every other row, and an ad cited at its start and end.
+    notes = "a (00:00) b (01:00) c (02:00) d (03:00) e (04:00) ad (04:00) (05:30)"
+    assert pipeline.uncited_stretches(rows, pipeline.cited_spans(notes), limit=120) == []
+
+
+def test_apply_summarize_rejects_notes_with_a_hole(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    directory = tasks.task_dirs(transcribed, "summarize")[0]
+    (directory / "payload.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _rows(12)), encoding="utf-8")
+    _results(transcribed, "summarize", [{"notes": "Only the opening (00:00)"}])
+    with pytest.raises(RuntimeError, match=r"000 \(00:30-05:59\)"):
+        pipeline.apply_summarize(transcribed)
+
+
+def test_only_single_half_width_citations_count():
+    assert pipeline.cited_spans("a (01:38) (02:09) 长视频 (75:20)") == [
+        (98.0, 98.0), (129.0, 129.0), (4520.0, 4520.0)]
+    # Every form the prompts forbid is ignored rather than guessed at.
+    for forbidden in ("(00:30, 01:10)", "(00:30-01:10)", "(约01:05)", "（01：05）", "(01：05)",
+                      "[03:00]", "(1:02:03)", "(12:00 to 14:30)", "(01:75)",
+                      "(０１:38)", "(01:３８)", "(١:38)"):
+        assert pipeline.cited_spans(forbidden) == [], forbidden
+
+
+def test_a_part_cited_only_in_forbidden_forms_is_rejected(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    directory = tasks.task_dirs(transcribed, "summarize")[0]
+    (directory / "payload.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _rows(12)), encoding="utf-8")
+    _results(transcribed, "summarize", [{"notes": "All of it (00:00-05:59) （03：00）"}])
+    with pytest.raises(RuntimeError, match=r"other than \(MM:SS\): 000: \(00:00-05:59\)"):
+        pipeline.apply_summarize(transcribed)
+
+
+def test_a_forbidden_form_is_refused_even_when_coverage_is_fine(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    directory = tasks.task_dirs(transcribed, "summarize")[0]
+    (directory / "payload.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _rows(4)), encoding="utf-8")
+    notes = "a (00:00) b (00:30) c (01:00) d (01:30) and once （01:30）"
+    _results(transcribed, "summarize", [{"notes": notes}])
+    with pytest.raises(RuntimeError, match="（01:30）"):
+        pipeline.apply_summarize(transcribed, allow_gaps=True)
+
+
+def test_apply_synthesize_refuses_a_forbidden_form(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    _results(transcribed, "summarize", [{"notes": "They count to twelve (00:00)"}])
+    pipeline.apply_summarize(transcribed)
+    pipeline.plan_synthesize(transcribed, language="English")
+    _results(transcribed, "synthesize", [{"summary": "# Counting\n\nThey count (00:00-00:05)"}])
+    with pytest.raises(RuntimeError, match=r"\(00:00-00:05\)"):
+        pipeline.apply_synthesize(transcribed)
+    assert not (transcribed / "out" / "summary.md").exists()
+
+
+def test_silence_between_rows_is_not_counted_as_uncited_speech():
+    rows = [{"start": 100.0, "end": 110.0, "text": "a"}, {"start": 300.0, "end": 310.0, "text": "b"}]
+    assert pipeline.uncited_stretches(rows, [], limit=120) == []
+    # Many short cue rows: measured by their speech, not by the clock they span.
+    cues = [{"start": i * 4.0, "end": i * 4.0 + 3.0, "text": "x"} for i in range(50)]
+    assert pipeline.uncited_stretches(cues, [], limit=120) == [(0.0, 199.0)]
+    assert pipeline.uncited_stretches(cues[:35], [], limit=120) == []
+
+
+def test_allow_gaps_records_instead_of_refusing(transcribed):
+    pipeline.plan_summarize(transcribed, language="English")
+    directory = tasks.task_dirs(transcribed, "summarize")[0]
+    (directory / "payload.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in _rows(12)), encoding="utf-8")
+    _results(transcribed, "summarize", [{"notes": "Only the opening (00:00)"}])
+    result = pipeline.apply_summarize(transcribed, allow_gaps=True)
+    assert result["uncited_stretches"] == ["000 (00:30-05:59)"]
+
+
+def test_summary_parts_default_to_six_minutes(transcribed):
+    assert pipeline.SUMMARY_SECONDS_PER_TASK == 360
+    words = json.loads((transcribed / "asr" / "words.json").read_text(encoding="utf-8"))
+    words["words"] = [{"text": f"w{i}", "start": i * 10.0, "end": i * 10.0 + 1.0}
+                      for i in range(72)]  # twelve minutes of speech
+    (transcribed / "asr" / "words.json").write_text(json.dumps(words), encoding="utf-8")
+    assert pipeline.plan_summarize(transcribed, language="English")["parts"] == 2
+
+
 def test_synthesize_writes_the_summary(transcribed):
     pipeline.plan_summarize(transcribed, language="English")
     _results(transcribed, "summarize", [{"notes": "They count to twelve (00:00)"}])

@@ -365,14 +365,139 @@ def download_youtube_via_direct_urls(
     raise RuntimeError(f"yt-dlp could not download the video: {detail}")
 
 
+AUDIO_ONLY_STREAM = StreamChoice(stream_id="audio-only", height=0, quality="audio only")
+_DEFAULT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _audio_file(job_dir: Path) -> Path | None:
+    candidates = [p for p in job_dir.iterdir()
+                  if p.is_file() and p.name.startswith("audio.") and p.stat().st_size > 0
+                  and not p.name.endswith((".part", ".download", ".ytdl"))]
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def _clear_audio(job_dir: Path) -> None:
+    for path in list(job_dir.iterdir()):
+        if path.is_file() and path.name.startswith("audio."):
+            path.unlink(missing_ok=True)
+
+
+def _yt_dlp_audio(url: str, job_dir: Path, cookies: Path | None) -> Path | None:
+    # Quiet: progress lines land in the orchestrator's context ahead of the JSON
+    # report, thousands of them on a long download. Errors still reach stderr.
+    # bestaudio only: "/best" would fetch a muxed video into audio.* and report
+    # it as audio-only, ignoring --max-height. A miss returns None instead, and
+    # the caller takes the normal video path.
+    command = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-write-subs",
+               "--no-write-auto-subs", "--quiet", "--no-progress", "--js-runtimes", "node",
+               "-f", "bestaudio", "-o", str(job_dir / "audio.%(ext)s")]
+    if cookies:
+        command.extend(["--cookies", str(cookies)])
+    command.append(url)
+    try:
+        run(command)
+    except subprocess.CalledProcessError:
+        _clear_audio(job_dir)
+        return None
+    found = _audio_file(job_dir)
+    if found is None or not _is_audio_only(found):
+        _clear_audio(job_dir)
+        return None
+    return found
+
+
+def _is_audio_only(path: Path) -> bool:
+    try:
+        probe = probe_media(path)
+    except RuntimeError:
+        return False
+    return bool(probe["has_audio"] and not probe["has_video"] and probe["duration"])
+
+
+def _container_suffix(path: Path) -> str:
+    """`.webm` for a Matroska/WebM file, `.m4a` otherwise: DASH audio is one or the other."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=format_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(path)],
+        text=True, capture_output=True, check=False,
+    )
+    name = (result.stdout or "").strip().lower()
+    return ".webm" if ("webm" in name or "matroska" in name) else ".m4a"
+
+
+def _dash_audio_urls(metadata: dict[str, Any]) -> list[str]:
+    """The audio half of a DASH stream, which you-get lists as src = [video, audio]."""
+    for info in (metadata.get("streams") or {}).values():
+        src = info.get("src")
+        if (isinstance(src, list) and len(src) == 2 and all(isinstance(part, list) for part in src)
+                and src[1] and all(isinstance(u, str) and u.startswith("http") for u in src[1])):
+            return list(src[1])
+    return []
+
+
+def _fetch_dash_audio(metadata: dict[str, Any], job_dir: Path) -> Path | None:
+    import urllib.request
+
+    urls = _dash_audio_urls(metadata)
+    if not urls:
+        return None
+    extra = metadata.get("extra") if isinstance(metadata.get("extra"), dict) else {}
+    headers = {"Referer": str(extra.get("referer") or metadata.get("url") or ""),
+               "User-Agent": str(extra.get("ua") or _DEFAULT_UA)}
+    target = job_dir / "audio.download"
+    try:
+        with target.open("wb") as out:
+            for part in urls:
+                request = urllib.request.Request(part, headers=headers)
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    while chunk := response.read(1 << 20):
+                        out.write(chunk)
+        # The [video, audio] shape is a guess about the extractor; only a file
+        # that probes as audio with no picture is accepted as the audio track.
+        if not _is_audio_only(target):
+            _clear_audio(job_dir)
+            return None
+        final = target.with_suffix(_container_suffix(target))
+        target.replace(final)
+        return final
+    except Exception:
+        # Any failure, including a connection dropped mid-body (IncompleteRead is
+        # not an OSError), falls back to the video path with nothing left behind.
+        _clear_audio(job_dir)
+        return None
+
+
+def download_audio(
+    url: str,
+    job_dir: Path,
+    *,
+    cookies: Path | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Path | None:
+    """Fetch only the audio track, for a job that will never look at the picture.
+
+    A summary needs the speech and nothing else, and the video stream is most of
+    the bytes. Returns None when the site offers no separate audio track or the
+    fetch fails, so the caller can fall back to the full download.
+    """
+    metadata = metadata if metadata is not None else inspect_url(url, cookies)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    if metadata.get("backend") == "you-get-with-yt-dlp-url-resolution":
+        return _yt_dlp_audio(url, job_dir, cookies)
+    return _fetch_dash_audio(metadata, job_dir) or (
+        _yt_dlp_audio(url, job_dir, cookies) if is_youtube_url(url) else None)
+
+
 def download_video(
     url: str,
     job_dir: Path,
     *,
     cookies: Path | None = None,
     max_height: int = 720,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], StreamChoice]:
-    metadata = inspect_url(url, cookies)
+    metadata = metadata if metadata is not None else inspect_url(url, cookies)
     choice = choose_stream(metadata, max_height=max_height)
     job_dir.mkdir(parents=True, exist_ok=True)
     if metadata.get("backend") == "you-get-with-yt-dlp-url-resolution":
@@ -468,6 +593,9 @@ def take_frame(manifest_path: Path, timestamp: str) -> Path:
     frames = manifest.setdefault("screenshots", [])
     if len(frames) >= 10:
         raise RuntimeError("the 10-screenshot limit has been reached for this video")
+    if manifest.get("audio_only"):
+        raise RuntimeError("this job fetched the audio only, so there is no picture to grab. "
+                           "Create the job again without --audio-only to get the video.")
     video = Path(manifest["media"])
     if not video.exists():
         raise RuntimeError("video has already been deleted")

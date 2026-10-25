@@ -260,6 +260,19 @@ List in cues only the ids you changed Set checked to the number of non-context
 payload rows you read which proves you covered the whole payload"""
 
 
+# One form only, so the coverage check and the link pass read every citation the
+# same way. The coverage check counts nothing else, and a list merged into one
+# bracket is also left unlinked in the final summary.
+CITATION_FORMAT = """Write each citation as one time in half-width parentheses with a half-width
+colon such as (01:38) Cite several moments as separate citations such as
+(01:38) (02:09) Never merge them into one bracket never write a range never add
+words or spaces inside the bracket never use any other bracket such as [ ] 【 】
+or 「 」 and never use full-width （ ） ： or digits even in Chinese or Japanese
+text Never write hours Minutes go past 59 on a long video such as (75:20) not
+(1:15:20) Put a ratio a score or a time of day that is not a citation outside
+brackets"""
+
+
 def summarize(*, language: str, instructions: str = "") -> str:
     return f"""Write notes on one stretch of a video from its transcript
 
@@ -268,8 +281,13 @@ start and end are seconds from the beginning of the video
 
 Cover what is said in this stretch in {language} Keep the speaker's claims and
 numbers as stated and do not add anything that is not in the transcript
-Cite a timestamp in (MM:SS) form after each point taking it from the row the
-point came from Every paragraph needs at least one citation
+Cite a timestamp in (MM:SS) form after each point using the start time of the
+row the point came from Every paragraph needs at least one citation
+{CITATION_FORMAT}
+Work through every row in order and do not skip a stretch More than two minutes
+of rows with no citation is rejected and the task is sent back For an ad a song
+or other off-topic stretch write one short sentence and cite where it starts and
+where it ends as two citations such as (12:00) (14:30)
 Write prose in short paragraphs not a bulleted outline
 
 {instructions or ""}
@@ -319,6 +337,7 @@ Each payload row is notes on one part in order: part start end notes
 Write the final summary of "{title}" in {language}
 Keep every (MM:SS) citation attached to the point it supports and do not invent
 new ones
+{CITATION_FORMAT}
 Merge repetition across parts and keep the chronology of the video
 Open with a short paragraph saying what the video is then cover the substance
 Write prose in short paragraphs not a bulleted outline{_length_rule(duration)}
